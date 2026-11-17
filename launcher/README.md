@@ -8,7 +8,7 @@ Video controls use the same `runtime/graphics-options.ini` and `runtime/display-
 
 Build output appears in the **Build log** tab and `runtime/launcher-build.log`. Cancelling or failing a rebuild preserves the previous playable EXE. Closing the launcher during a build cancels its compiler process tree first. Closing it while playing leaves the game running.
 
-**Android** builds `artifacts/android/L4D2Rewrite.apk` (arm64, touch controls) with `tools/build-apk.ps1`. The first build installs the Android SDK, NDK and a JDK under `%LOCALAPPDATA%\l4d2r-android` (~4 GB) and accepts the Android SDK license. Game data: *APK only* leaves it out. *Push data to phone* copies your Left 4 Dead 2 folders to the phone over USB with adb (turn on USB debugging). *Bundle* packs them into the APK, which only works when they total under 4 GB (a full install is ~14 GB). Output goes to the Build activity tab and `runtime/launcher-apk.log`.
+**Android** support is coming soon; the tab is greyed out for now.
 
 **Look and branding.** The launcher follows the L4D2 menus:
 - a grained near-black backdrop with a vignette;

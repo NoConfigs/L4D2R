@@ -115,22 +115,15 @@ namespace L4D2R.Launcher
             tabs.Controls.Add(androidPage); tabs.Controls.Add(logPage); tabs.Controls.Add(videoPage);
             layout.Controls.Add(tabs, 0, 3);
 
-            // Android page.
-            var androidLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 5, Margin = Padding.Empty, BackColor = Color.Transparent };
-            androidLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170)); androidLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            androidLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48)); androidLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 104)); androidLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48)); androidLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44)); androidLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            var androidTitle = new SectionTitle("Android build") { Dock = DockStyle.Fill, Margin = Padding.Empty }; androidLayout.Controls.Add(androidTitle, 0, 0); androidLayout.SetColumnSpan(androidTitle, 2);
-            var androidInfo = new Label { Dock = DockStyle.Fill, Font = Theme.Body(10), ForeColor = Theme.Muted, BackColor = Color.Transparent, Padding = new Padding(0, 8, 0, 0), Text =
-                "Builds artifacts\\android\\L4D2Rewrite.apk (arm64, touch controls). The first build installs the Android SDK, NDK and a JDK in your user folder (about 4 GB) and accepts the Android SDK license.\n\n" +
-                "APK only leaves the game data out. Push copies your Left 4 Dead 2 folders to the phone over USB (USB debugging on). Bundle packs them into the APK, which only works under 4 GB." };
-            androidLayout.Controls.Add(androidInfo, 0, 1); androidLayout.SetColumnSpan(androidInfo, 2);
-            Combo(apkMode, new[] { "APK only", "Push data to phone (USB)", "Bundle data into APK" }); apkMode.SelectedIndex = 0; apkMode.AccessibleName = "Android game data";
-            androidLayout.Controls.Add(FieldLabel("Game data"), 0, 2); androidLayout.Controls.Add(apkMode, 1, 2);
-            apkInstall.Text = "Install on the connected phone"; apkInstall.Dock = DockStyle.Fill; androidLayout.Controls.Add(apkInstall, 0, 3); androidLayout.SetColumnSpan(apkInstall, 2);
-            ButtonStyle(buildApk, "Build APK"); buildApk.Kind = ButtonKind.Primary; buildApk.Dock = DockStyle.None; buildApk.Size = new Size(180, 46); buildApk.Font = Theme.Display(15); buildApk.Margin = new Padding(0, 12, 0, 0);
-            var apkActions = new FlowLayoutPanel { Dock = DockStyle.Fill, Margin = Padding.Empty, BackColor = Color.Transparent }; apkActions.Controls.Add(buildApk); androidLayout.Controls.Add(apkActions, 0, 4); androidLayout.SetColumnSpan(apkActions, 2);
+            // Android: not ready yet, so the tab is greyed out and only says so.
+            var androidLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, Margin = Padding.Empty, BackColor = Color.Transparent };
+            androidLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48)); androidLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            androidLayout.Controls.Add(new SectionTitle("Android") { Dock = DockStyle.Fill, Margin = Padding.Empty }, 0, 0);
+            androidLayout.Controls.Add(new Label { Dock = DockStyle.Fill, Font = Theme.Display(21), ForeColor = Theme.Disabled, BackColor = Color.Transparent, Padding = new Padding(0, 8, 0, 0), Text = "COMING SOON" }, 0, 1);
             androidPage.Controls.Add(androidLayout);
-            buildApk.Click += async (s, e) => await BuildApk();
+            androidNav.Enabled = false; androidNav.Cursor = Cursors.Default; androidNav.Width = 130;
+            var androidSoon = new Label { Text = "COMING SOON", Font = Theme.Display(9), ForeColor = Theme.Disabled, BackColor = Color.Transparent, AutoSize = true, Location = new Point(136, androidNav.Top + 19) };
+            sidebar.Controls.Add(androidSoon); androidSoon.BringToFront();
 
             // Video page.
             var videoLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = Padding.Empty, BackColor = Color.Transparent };

@@ -17,9 +17,6 @@ __pycache__/
 /target-trace/
 *.zip
 # Mobile builds (tools/build-apk.ps1, ios/build-ipa.sh)
-/android/target/
-/android/apk-assets/
-/android/Cargo.lock
 /ios/target/
 /ios/build/
 /ios/ffmpeg/

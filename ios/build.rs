@@ -1,5 +1,4 @@
-// The desktop build.rs with paths relative to this folder (see
-// android/build.rs for the clang flags squirrel needs).
+// The desktop build.rs with paths relative to this folder.
 fn main() {
     println!("cargo:rerun-if-changed=../vendor/squirrel");
     println!("cargo:rerun-if-changed=../src/vscript/bridge.cpp");
