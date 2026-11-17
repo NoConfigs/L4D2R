@@ -63,7 +63,7 @@ Each system counts as matched (100%), working but approximate (50%) or missing (
 
 - Versus and Scavenge modes, and infected players over the network.
 - Smarter special-infected AI (they use the original numbers but simpler decisions).
-- The Tank hitting cars and other props, and the Witch's headshot stumble.
+- The Witch's headshot stumble.
 - Original physics engine behaviour for props and ragdolls (currently a close reconstruction).
 - Colour correction, the flashlight's projected texture and full model lighting.
 - Weapon spread patterns, recoil and bullet penetration.
