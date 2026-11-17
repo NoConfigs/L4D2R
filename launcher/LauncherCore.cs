@@ -234,6 +234,12 @@ namespace L4D2R.Launcher
                         else File.Move(temporary, Binary);
                     }
                     finally { if (File.Exists(temporary)) File.Delete(temporary); }
+                    // Steamworks: the exe loads steam_api64.dll from its own
+                    // folder; Cargo leaves it in steamworks-sys's build output.
+                    string builds = Path.Combine(Path.GetDirectoryName(output), "build");
+                    FileInfo steamDll = Directory.Exists(builds) ? new DirectoryInfo(builds).GetFiles("steam_api64.dll", SearchOption.AllDirectories).OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault() : null;
+                    if (steamDll != null) File.Copy(steamDll.FullName, Path.Combine(Path.GetDirectoryName(Binary), "steam_api64.dll"), true);
+                    else line("Warning: steam_api64.dll was not found in the build output; the game may not start.");
                     line("Build complete. Future launches use this saved EXE.");
                 }
                 finally { BuildProcess = null; }
