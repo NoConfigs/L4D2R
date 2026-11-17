@@ -1,0 +1,44 @@
+# iOS build of the rewrite: a static library whose root src/ios_main.rs
+# includes src/main.rs, linked into the app by ios/build-ipa.sh (macOS).
+[package]
+name = "l4d2r-ios"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[lib]
+name = "l4d2r_ios"
+path = "../src/ios_main.rs"
+crate-type = ["staticlib"]
+
+[dependencies]
+bevy = { version = "=0.19.1", features = ["wav", "mp3"] }
+zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
+half = "=2.7.1"
+crc32fast = "=1.5.2"
+# Shared physics diagnostics are also compiled in debug builds.
+serde_json = { version = "=1.0.151", features = ["float_roundtrip"] }
+l4d2-formats = { path = "../vendor/l4d2r-formats" }
+l4d2r-game-core = { path = "../vendor/l4d2r-game" }
+l4d2r-math = { package = "glam", version = "0.30" }
+mimalloc = { version = "=0.1.52", default-features = false }
+l4d2r-steam-installer = { path = "../mobile/steam-installer" }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+
+[features]
+mobile-materials = []
+profile-trace = []
+
+[build-dependencies]
+cc = "=1.6.0"
+
+[profile.release]
+debug = false
+
+# winit 0.30.13 with one iOS fix (vendor/winit, see L4D2R patch in
+# src/platform_impl/ios/view.rs): layoutSubviews sizes the window with the
+# view's contentScaleFactor, which the render resolution setting lowers.
+[patch.crates-io]
+# Shared game code uses the exposure readback extension in this vendored crate.
+bevy_post_process = { path = "../vendor/bevy_post_process" }
+winit = { path = "../vendor/winit" }

@@ -1,0 +1,54 @@
+[package]
+name = "l4d2-rewrite"
+version = "0.1.0"
+edition = "2024"
+default-run = "l4d2-rewrite"
+license = "Apache-2.0"
+
+[dependencies]
+# Physics diagnostic snapshots are also compiled in normal debug builds.
+serde_json = { version = "=1.0.151", features = ["float_roundtrip"] }
+bevy = { version = "=0.19.1", features = ["wav", "mp3", "system_clipboard"] }
+zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
+half = "=2.7.1"
+crc32fast = "=1.5.2"
+l4d2-formats = { path = "vendor/l4d2r-formats" }
+l4d2r-game-core = { path = "vendor/l4d2r-game" }
+l4d2r-math = { package = "glam", version = "0.30" }
+# Windows' default process heap fragments badly once a large map is freed
+# (every later allocation slows down); mimalloc does not.
+mimalloc = { version = "=0.1.52", default-features = false }
+# Opt-in per-system timing (profile-trace); normal builds do not enable it.
+bevy_ecs_trace = { package = "bevy_ecs", version = "=0.19.1", optional = true, features = ["trace", "debug"] }
+
+# Steam name, lobbies and relayed connections on desktop (Steamworks SDK;
+# needs steam_api64.dll next to the exe and Steam running). Not on phones.
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
+steamworks = { version = "=0.13.1", features = ["raw-bindings"] }
+
+[features]
+mobile-materials = []
+profile-trace = ["dep:bevy_ecs_trace"]
+
+[build-dependencies]
+cc = "=1.6.0"
+
+
+# `cargo build --profile profiling`: release code with function names for
+# --profile-sample (src/stack_sampler.rs). Normal release builds unchanged.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+
+[profile.dev]
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 3
+
+# AccessKit's Windows adapter panics when SetPropW fails at start-up (seen as
+# "Not enough memory resources" on a first launch); the patched copy retries
+# and otherwise runs without the screen-reader hook.
+[patch.crates-io]
+accesskit_windows = { path = "vendor/accesskit_windows" }
+bevy_post_process = { path = "vendor/bevy_post_process" }

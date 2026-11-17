@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleDisplayName</key><string>L4D2 Rewrite</string>
+    <key>CFBundleExecutable</key><string>L4D2Rewrite</string>
+    <key>CFBundleIdentifier</key><string>com.l4d2r.rewrite</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>L4D2Rewrite</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>17</string>
+    <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+    <key>LSRequiresIPhoneOS</key><true/>
+    <key>MinimumOSVersion</key><string>15.0</string>
+    <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
+    <key>UIRequiredDeviceCapabilities</key><array><string>arm64</string><string>metal</string></array>
+    <key>UIRequiresFullScreen</key><true/>
+    <key>UIStatusBarHidden</key><true/>
+    <key>UILaunchScreen</key><dict/>
+    <key>UISupportedInterfaceOrientations</key>
+    <array><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+    <!-- Documents appears in the Files app and Finder/iTunes file sharing:
+         the Left 4 Dead 2 data is copied there. -->
+    <key>UIFileSharingEnabled</key><true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key><true/>
+    <!-- Trackpad/mouse input on iPad arrives as pointer events. -->
+    <key>UIApplicationSupportsIndirectInputEvents</key><true/>
+    <!-- Multiplayer over Wi-Fi: hosting (listening on 27015..27018) and
+         `connect <address>` reach other devices on the local network, which
+         iOS 14+ allows only after this prompt. -->
+    <key>NSLocalNetworkUsageDescription</key><string>Play co-op with friends on the same Wi-Fi network.</string>
+</dict>
+</plist>

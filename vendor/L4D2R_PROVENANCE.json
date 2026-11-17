@@ -1,0 +1,79 @@
+{
+  "source_directory": "private local folder",
+  "supplied_by": "The project owner",
+  "license_metadata": "Owned by the project owner and licensed with the rest of L4D2R under Apache-2.0 (see LICENSE).",
+  "files": [
+    {
+      "source": "crates/l4d2-formats/src/anim.rs",
+      "sha256": "7d16795bf2488cc112cee59fdd3e257765a9904a529f02eeca7712fce5519718"
+    },
+    {
+      "source": "crates/l4d2-formats/src/bsp.rs",
+      "sha256": "c78d5f051bc7beb451330b843169fb0b821ff5fb00b2725a4b84207c93574b99"
+    },
+    {
+      "source": "crates/l4d2-formats/src/kv.rs",
+      "sha256": "e2e4318e9a00d990ca5c7d5cb56d2302c799772ddf6462e0672f4ddb35bde6e8"
+    },
+    {
+      "source": "crates/l4d2-formats/src/lib.rs",
+      "sha256": "bd01caf00a25c796304a0153aa2a0dc2f96a3f130a116d589c9cb33d7461d6bb"
+    },
+    {
+      "source": "crates/l4d2-formats/src/mdl.rs",
+      "sha256": "dd7f2d4445b61ff2d4eeb858251d2ec65bc3794f2288187e409596d5362a3974"
+    },
+    {
+      "source": "crates/l4d2-formats/src/nav.rs",
+      "sha256": "80e0c96a4b4a1ddff0a5dc9d7ef108d6bf5d319677af8d8ae5afb69b619e8b8d"
+    },
+    {
+      "source": "crates/l4d2-formats/src/phy.rs",
+      "sha256": "c415c1700409a6e3784a124c19ecf3c0d7811d94622d624de4173e7dbe349c2f"
+    },
+    {
+      "source": "crates/l4d2-formats/src/sound.rs",
+      "sha256": "ab0d32b4149d6e51c327dfbd06b530eb3e9deef820df858b8a269aaf320e5cc9"
+    },
+    {
+      "source": "crates/l4d2-formats/src/vhv.rs",
+      "sha256": "d8ce6433ad7f78929be64582efbb355dd270542a61522c34fd40a0e65b2cd6c7"
+    },
+    {
+      "source": "crates/l4d2-formats/src/vmf.rs",
+      "sha256": "5145ed5697285174e8b36b04ad4b0c1680c3762693e54152667fc40ceb1af7ab"
+    },
+    {
+      "source": "crates/l4d2-formats/src/vmt.rs",
+      "sha256": "9fe840ec9f790cafdc64429b9a8d7b12e639aeb921537ec2788961c12e0e407b"
+    },
+    {
+      "source": "crates/l4d2-formats/src/vtf.rs",
+      "sha256": "9e7e503856c833f99d3c66f7dd06e9b1544185b46b9a21ef62424c854c3899df"
+    },
+    {
+      "source": "crates/l4d2-game/src/entities.rs",
+      "sha256": "8d18981afb1147e12101f61185464ff5ed271b74b1c4940364db96816a953869"
+    },
+    {
+      "source": "crates/l4d2-game/src/mapents.rs",
+      "sha256": "f0563890d0c77b3647a9c8a1c8d29bef30ef0d71c17464509c5d76f26c61376c"
+    },
+    {
+      "source": "crates/l4d2-game/src/navgraph.rs",
+      "sha256": "63f7e6df617566fbf5134d1eca2eb91108fad66619e09b2efd5ff430b536c5f5"
+    },
+    {
+      "source": "crates/l4d2-game/src/propcol.rs",
+      "sha256": "2e6e1737dfc8d8f9615bc6bca43027da38f9901c2496f7b105e00f3323902d7c"
+    },
+    {
+      "source": "crates/l4d2-game/src/random.rs",
+      "sha256": "06ff2da797198ddc92824e3e06ca057027bb281101371e18a8e43648419d4418"
+    },
+    {
+      "source": "crates/l4d2-game/src/trace.rs",
+      "sha256": "c65b0e1aae3f78fc50b4b69c5a52f87dd8720de497607da0dd675cbd3489f2b2"
+    }
+  ]
+}

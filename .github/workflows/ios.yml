@@ -1,0 +1,43 @@
+# Builds the iOS app on a GitHub macOS runner and uploads L4D2Rewrite.ipa
+# (ad-hoc signed; sideload it with your Apple ID via Sideloadly/AltStore).
+# Run it from the Actions tab ("Build iOS IPA" -> Run workflow) or by pushing.
+name: Build iOS IPA
+on:
+  workflow_dispatch:
+  push:
+    paths: ["src/**", "ios/**", "mobile/**", "vendor/**", "assets/**", "launcher/assets/logo.png", "tools/verify_ios_icon.py", "tools/make-ios-icon.ps1", "Cargo.lock", ".github/workflows/ios.yml"]
+jobs:
+  ipa:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ios/target
+            mobile/steam-installer/target
+          key: ios-${{ hashFiles('ios/Cargo.lock', 'ios/Cargo.toml') }}
+          restore-keys: |
+            ios-
+      - uses: actions/cache@v4
+        with:
+          path: ios/ffmpeg
+          key: ffmpeg-ios-${{ hashFiles('ios/build-ffmpeg.sh') }}
+      - name: Build Bink-only FFmpeg
+        run: sh ios/build-ffmpeg.sh
+      - name: Test Steam installer
+        run: cargo test --manifest-path mobile/steam-installer/Cargo.toml --locked
+      - name: Build IPA
+        run: |
+          sh ios/build-ipa.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: L4D2Rewrite-ipa
+          path: artifacts/ios/L4D2Rewrite.ipa
+          if-no-files-found: error

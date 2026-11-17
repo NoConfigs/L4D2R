@@ -1,0 +1,30 @@
+/target
+/local-assets
+/asset-index.txt
+/map-load-report.txt
+/hotel-preview*.png
+*.log
+/.tools
+/sky-probe.ppm
+/sky-probe.png
+/local-research
+/game-preview*.png
+__pycache__/
+
+/runtime/
+/L4D2R Launcher.exe
+/artifacts/
+/target-trace/
+*.zip
+# Mobile builds (tools/build-apk.ps1, ios/build-ipa.sh)
+/android/target/
+/android/apk-assets/
+/android/Cargo.lock
+/ios/target/
+/ios/build/
+/ios/ffmpeg/
+/ios/ffmpeg-src/
+/mobile/steam-installer/target/
+
+# Vendor crates built on their own
+/vendor/*/target/

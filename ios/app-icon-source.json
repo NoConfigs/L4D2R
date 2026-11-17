@@ -1,0 +1,6 @@
+{
+  "source": "launcher/assets/logo.png",
+  "sha256": "c5d4556765a3f19cc2c2cab109a52ac1fadcb9a6b2756d6afcfcd92bcecb3ed6",
+  "background": "#000000",
+  "layout": "Same centred, aspect-preserving layout as launcher/app.ico"
+}

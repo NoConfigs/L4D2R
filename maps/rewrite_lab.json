@@ -1,0 +1,1503 @@
+{
+  "name": "Rewrite Laboratory",
+  "generator": "tools/build_test_map.py",
+  "bsp_bytes": 104048,
+  "bsp_sha256": "1e3ede89bb9626d9e3cd1e991598daba208685bcc6b60ec3a58db5f922da47b6",
+  "nav_areas": 308,
+  "boxes": [
+    {
+      "lo": [
+        -32,
+        -32,
+        -32
+      ],
+      "hi": [
+        4128,
+        3104,
+        0
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        -32,
+        -32,
+        0
+      ],
+      "hi": [
+        0,
+        3104,
+        320
+      ],
+      "material": "brick/brickwall019a",
+      "model": 0
+    },
+    {
+      "lo": [
+        4096,
+        -32,
+        0
+      ],
+      "hi": [
+        4128,
+        3104,
+        320
+      ],
+      "material": "brick/brickwall019a",
+      "model": 0
+    },
+    {
+      "lo": [
+        0,
+        -32,
+        0
+      ],
+      "hi": [
+        4096,
+        0,
+        320
+      ],
+      "material": "brick/brickwall019a",
+      "model": 0
+    },
+    {
+      "lo": [
+        0,
+        3072,
+        0
+      ],
+      "hi": [
+        4096,
+        3104,
+        320
+      ],
+      "material": "brick/brickwall019a",
+      "model": 0
+    },
+    {
+      "lo": [
+        160,
+        280,
+        0
+      ],
+      "hi": [
+        1600,
+        360,
+        32
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        160,
+        460,
+        0
+      ],
+      "hi": [
+        1600,
+        540,
+        32
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        160,
+        640,
+        0
+      ],
+      "hi": [
+        1600,
+        720,
+        32
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        2700,
+        2200,
+        0
+      ],
+      "hi": [
+        2724,
+        2496,
+        12
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        2724,
+        2200,
+        0
+      ],
+      "hi": [
+        2748,
+        2496,
+        24
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        2748,
+        2200,
+        0
+      ],
+      "hi": [
+        2772,
+        2496,
+        36
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        2772,
+        2200,
+        0
+      ],
+      "hi": [
+        2796,
+        2496,
+        48
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        2796,
+        2200,
+        0
+      ],
+      "hi": [
+        2820,
+        2496,
+        60
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        2820,
+        2200,
+        0
+      ],
+      "hi": [
+        2844,
+        2496,
+        72
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        2844,
+        2200,
+        0
+      ],
+      "hi": [
+        2868,
+        2496,
+        84
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        2868,
+        2200,
+        0
+      ],
+      "hi": [
+        2892,
+        2496,
+        96
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        2892,
+        2200,
+        0
+      ],
+      "hi": [
+        2916,
+        2496,
+        108
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        2916,
+        2200,
+        0
+      ],
+      "hi": [
+        2940,
+        2496,
+        120
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        2940,
+        2200,
+        0
+      ],
+      "hi": [
+        2964,
+        2496,
+        132
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        2964,
+        2200,
+        0
+      ],
+      "hi": [
+        2988,
+        2496,
+        144
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        2988,
+        2200,
+        0
+      ],
+      "hi": [
+        3300,
+        2496,
+        144
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3380,
+        2180,
+        0
+      ],
+      "hi": [
+        3540,
+        2212,
+        32
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3380,
+        2330,
+        0
+      ],
+      "hi": [
+        3540,
+        2362,
+        48
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        2700,
+        2700,
+        64
+      ],
+      "hi": [
+        3150,
+        2920,
+        96
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        2700,
+        2700,
+        0
+      ],
+      "hi": [
+        2732,
+        2920,
+        64
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3118,
+        2700,
+        0
+      ],
+      "hi": [
+        3150,
+        2920,
+        64
+      ],
+      "material": "concrete/concretefloor005a",
+      "model": 0
+    },
+    {
+      "lo": [
+        1800,
+        200,
+        0
+      ],
+      "hi": [
+        1832,
+        1050,
+        192
+      ],
+      "material": "brick/brickwall019a",
+      "model": 0
+    },
+    {
+      "lo": [
+        2700,
+        1200,
+        0
+      ],
+      "hi": [
+        2840,
+        1224,
+        192
+      ],
+      "material": "brick/brickwall019a",
+      "model": 0
+    },
+    {
+      "lo": [
+        2968,
+        1200,
+        0
+      ],
+      "hi": [
+        3140,
+        1224,
+        192
+      ],
+      "material": "brick/brickwall019a",
+      "model": 0
+    },
+    {
+      "lo": [
+        2840,
+        1200,
+        120
+      ],
+      "hi": [
+        2968,
+        1224,
+        192
+      ],
+      "material": "brick/brickwall019a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3600,
+        200,
+        0
+      ],
+      "hi": [
+        3900,
+        900,
+        160
+      ],
+      "material": "brick/brickwall019a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        250,
+        14
+      ],
+      "hi": [
+        3600,
+        314,
+        18
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        250,
+        30
+      ],
+      "hi": [
+        3600,
+        314,
+        34
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        250,
+        46
+      ],
+      "hi": [
+        3600,
+        314,
+        50
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        250,
+        62
+      ],
+      "hi": [
+        3600,
+        314,
+        66
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        250,
+        78
+      ],
+      "hi": [
+        3600,
+        314,
+        82
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        250,
+        94
+      ],
+      "hi": [
+        3600,
+        314,
+        98
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        250,
+        110
+      ],
+      "hi": [
+        3600,
+        314,
+        114
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        250,
+        126
+      ],
+      "hi": [
+        3600,
+        314,
+        130
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        250,
+        142
+      ],
+      "hi": [
+        3600,
+        314,
+        146
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        450,
+        14
+      ],
+      "hi": [
+        3600,
+        514,
+        18
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        450,
+        30
+      ],
+      "hi": [
+        3600,
+        514,
+        34
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        450,
+        46
+      ],
+      "hi": [
+        3600,
+        514,
+        50
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        450,
+        62
+      ],
+      "hi": [
+        3600,
+        514,
+        66
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        450,
+        78
+      ],
+      "hi": [
+        3600,
+        514,
+        82
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        450,
+        94
+      ],
+      "hi": [
+        3600,
+        514,
+        98
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        450,
+        110
+      ],
+      "hi": [
+        3600,
+        514,
+        114
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        450,
+        126
+      ],
+      "hi": [
+        3600,
+        514,
+        130
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        450,
+        142
+      ],
+      "hi": [
+        3600,
+        514,
+        146
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        650,
+        14
+      ],
+      "hi": [
+        3600,
+        714,
+        18
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        650,
+        30
+      ],
+      "hi": [
+        3600,
+        714,
+        34
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        650,
+        46
+      ],
+      "hi": [
+        3600,
+        714,
+        50
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        650,
+        62
+      ],
+      "hi": [
+        3600,
+        714,
+        66
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        650,
+        78
+      ],
+      "hi": [
+        3600,
+        714,
+        82
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        650,
+        94
+      ],
+      "hi": [
+        3600,
+        714,
+        98
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        650,
+        110
+      ],
+      "hi": [
+        3600,
+        714,
+        114
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        650,
+        126
+      ],
+      "hi": [
+        3600,
+        714,
+        130
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        650,
+        142
+      ],
+      "hi": [
+        3600,
+        714,
+        146
+      ],
+      "material": "metal/metalwall048a",
+      "model": 0
+    },
+    {
+      "lo": [
+        3596,
+        270,
+        0
+      ],
+      "hi": [
+        3600,
+        294,
+        160
+      ],
+      "material": "dev/dev_measureladder01",
+      "model": 1
+    },
+    {
+      "lo": [
+        3596,
+        470,
+        0
+      ],
+      "hi": [
+        3600,
+        494,
+        160
+      ],
+      "material": "dev/dev_measureladder01",
+      "model": 2
+    },
+    {
+      "lo": [
+        3596,
+        670,
+        0
+      ],
+      "hi": [
+        3600,
+        694,
+        160
+      ],
+      "material": "dev/dev_measureladder01",
+      "model": 3
+    },
+    {
+      "lo": [
+        2150,
+        1270,
+        36
+      ],
+      "hi": [
+        2160,
+        1300,
+        72
+      ],
+      "material": "metal/metalwall048a",
+      "model": 4
+    },
+    {
+      "lo": [
+        2840,
+        1210,
+        32
+      ],
+      "hi": [
+        2968,
+        1214,
+        120
+      ],
+      "material": "glass/glasswindowbreak070a",
+      "model": 5
+    },
+    {
+      "lo": [
+        3600,
+        1210,
+        0
+      ],
+      "hi": [
+        3728,
+        1226,
+        120
+      ],
+      "material": "wood/woodfloor005a",
+      "model": 6
+    },
+    {
+      "lo": [
+        2050,
+        1380,
+        0
+      ],
+      "hi": [
+        2450,
+        1500,
+        100
+      ],
+      "material": "glass/glasswindowbreak070a",
+      "model": 7
+    },
+    {
+      "lo": [
+        2480,
+        1600,
+        0
+      ],
+      "hi": [
+        2600,
+        1750,
+        72
+      ],
+      "material": "glass/glasswindowbreak070a",
+      "model": 8
+    },
+    {
+      "lo": [
+        3700,
+        2650,
+        0
+      ],
+      "hi": [
+        3900,
+        2900,
+        100
+      ],
+      "material": "glass/glasswindowbreak070a",
+      "model": 9
+    },
+    {
+      "lo": [
+        3740,
+        2630,
+        0
+      ],
+      "hi": [
+        4090,
+        3000,
+        120
+      ],
+      "material": "glass/glasswindowbreak070a",
+      "model": 10
+    }
+  ],
+  "entities": [
+    {
+      "classname": "worldspawn",
+      "mapversion": "1",
+      "skyname": "sky_l4d_c1_1_hdr",
+      "message": "L4D2 Rewrite Laboratory"
+    },
+    {
+      "classname": "func_simpleladder",
+      "model": "*1",
+      "team": "0",
+      "normal.x": "-1",
+      "normal.y": "0",
+      "normal.z": "0",
+      "targetname": "lab_ladder_team_0"
+    },
+    {
+      "classname": "func_simpleladder",
+      "model": "*2",
+      "team": "2",
+      "normal.x": "-1",
+      "normal.y": "0",
+      "normal.z": "0",
+      "targetname": "lab_ladder_team_2"
+    },
+    {
+      "classname": "func_simpleladder",
+      "model": "*3",
+      "team": "1",
+      "normal.x": "-1",
+      "normal.y": "0",
+      "normal.z": "0",
+      "targetname": "lab_ladder_team_1"
+    },
+    {
+      "classname": "info_survivor_position",
+      "survivorname": "ellis",
+      "origin": "128 128 4",
+      "angles": "0 0 0"
+    },
+    {
+      "classname": "info_survivor_position",
+      "survivorname": "rochelle",
+      "origin": "64 220 4",
+      "angles": "0 0 0"
+    },
+    {
+      "classname": "info_survivor_position",
+      "survivorname": "coach",
+      "origin": "64 300 4",
+      "angles": "0 0 0"
+    },
+    {
+      "classname": "info_survivor_position",
+      "survivorname": "nick",
+      "origin": "64 380 4",
+      "angles": "0 0 0"
+    },
+    {
+      "classname": "info_player_start",
+      "origin": "128 128 4",
+      "angles": "0 0 0"
+    },
+    {
+      "classname": "info_director",
+      "targetname": "lab_director"
+    },
+    {
+      "classname": "func_button",
+      "model": "*4",
+      "origin": "0 0 0",
+      "targetname": "lab_panic_button",
+      "spawnflags": "1025",
+      "wait": "8",
+      "OnPressed": [
+        "lab_director,Enable,,0,-1",
+        "lab_director,ForcePanicEvent,,0,-1"
+      ]
+    },
+    {
+      "classname": "weapon_pistol_spawn",
+      "origin": "220 320 36",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_pistol_magnum_spawn",
+      "origin": "370 320 36",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_smg_spawn",
+      "origin": "520 320 36",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_smg_silenced_spawn",
+      "origin": "670 320 36",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_smg_mp5_spawn",
+      "origin": "820 320 36",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_pumpshotgun_spawn",
+      "origin": "970 320 36",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_shotgun_chrome_spawn",
+      "origin": "1120 320 36",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_rifle_spawn",
+      "origin": "1270 320 36",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_rifle_ak47_spawn",
+      "origin": "1420 320 36",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_rifle_desert_spawn",
+      "origin": "220 500 36",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_rifle_sg552_spawn",
+      "origin": "370 500 36",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_autoshotgun_spawn",
+      "origin": "520 500 36",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_shotgun_spas_spawn",
+      "origin": "670 500 36",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_hunting_rifle_spawn",
+      "origin": "820 500 36",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_sniper_military_spawn",
+      "origin": "970 500 36",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_sniper_awp_spawn",
+      "origin": "1120 500 36",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_sniper_scout_spawn",
+      "origin": "1270 500 36",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_melee_spawn",
+      "melee_weapon": "fireaxe",
+      "origin": "220 700 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_melee_spawn",
+      "melee_weapon": "crowbar",
+      "origin": "370 700 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_melee_spawn",
+      "melee_weapon": "frying_pan",
+      "origin": "520 700 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_melee_spawn",
+      "melee_weapon": "machete",
+      "origin": "670 700 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_melee_spawn",
+      "melee_weapon": "katana",
+      "origin": "820 700 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_melee_spawn",
+      "melee_weapon": "baseball_bat",
+      "origin": "970 700 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_melee_spawn",
+      "melee_weapon": "cricket_bat",
+      "origin": "1120 700 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_melee_spawn",
+      "melee_weapon": "electric_guitar",
+      "origin": "1270 700 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_melee_spawn",
+      "melee_weapon": "tonfa",
+      "origin": "1420 700 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_melee_spawn",
+      "melee_weapon": "knife",
+      "origin": "220 820 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_melee_spawn",
+      "melee_weapon": "golfclub",
+      "origin": "370 820 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_melee_spawn",
+      "melee_weapon": "pitchfork",
+      "origin": "520 820 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_melee_spawn",
+      "melee_weapon": "shovel",
+      "origin": "670 820 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_first_aid_kit_spawn",
+      "origin": "220 1030 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_pain_pills_spawn",
+      "origin": "370 1030 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_adrenaline_spawn",
+      "origin": "520 1030 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_defibrillator_spawn",
+      "origin": "670 1030 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_molotov_spawn",
+      "origin": "820 1030 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_pipe_bomb_spawn",
+      "origin": "970 1030 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_vomitjar_spawn",
+      "origin": "1120 1030 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_gascan_spawn",
+      "origin": "1270 1030 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "weapon_ammo_spawn",
+      "origin": "1420 1030 4",
+      "angles": "0 0 0",
+      "count": "5"
+    },
+    {
+      "classname": "upgrade_spawn",
+      "origin": "1840 1030 4",
+      "angles": "0 0 0",
+      "laser_sight": "1",
+      "upgradepack_incendiary": "0",
+      "upgradepack_explosive": "0"
+    },
+    {
+      "classname": "weapon_upgradepack_incendiary_spawn",
+      "origin": "1990 1030 4",
+      "angles": "0 0 0",
+      "count": "1"
+    },
+    {
+      "classname": "weapon_upgradepack_explosive_spawn",
+      "origin": "2140 1030 4",
+      "angles": "0 0 0",
+      "count": "1"
+    },
+    {
+      "classname": "prop_door_rotating",
+      "targetname": "lab_door",
+      "origin": "3300 1212 0",
+      "angles": "0 90 0",
+      "model": "models/props_downtown/metal_door_112.mdl",
+      "spawnflags": "8192",
+      "speed": "180",
+      "distance": "90",
+      "returndelay": "-1",
+      "health": "150",
+      "hardware": "1"
+    },
+    {
+      "classname": "func_breakable",
+      "model": "*5",
+      "origin": "0 0 0",
+      "targetname": "lab_glass",
+      "health": "20",
+      "material": "0",
+      "spawnflags": "0"
+    },
+    {
+      "classname": "func_breakable",
+      "model": "*6",
+      "origin": "0 0 0",
+      "material": "1",
+      "targetname": "lab_wood",
+      "health": "60",
+      "spawnflags": "0"
+    },
+    {
+      "classname": "prop_physics",
+      "targetname": "lab_prop_0",
+      "origin": "3400 1600 40",
+      "angles": "0 0 0",
+      "model": "models/props_unique/airport/luggage1.mdl"
+    },
+    {
+      "classname": "prop_physics",
+      "targetname": "lab_prop_1",
+      "origin": "3490 1600 40",
+      "angles": "0 0 0",
+      "model": "models/props_unique/airport/luggage2.mdl"
+    },
+    {
+      "classname": "env_hudhint",
+      "targetname": "lab_hint",
+      "message": "TEST TRIGGER FIRED: door opened; fire enabled; delayed relay will stop it."
+    },
+    {
+      "classname": "env_fire",
+      "targetname": "lab_fire",
+      "origin": "2250 1660 4",
+      "firesize": "80",
+      "fireattack": "1",
+      "damagescale": "1",
+      "spawnflags": "0"
+    },
+    {
+      "classname": "info_particle_system",
+      "targetname": "lab_particles",
+      "origin": "2250 1660 4",
+      "effect_name": "c1m1_fire_particles_1",
+      "start_active": "0"
+    },
+    {
+      "classname": "ambient_generic",
+      "targetname": "lab_sound",
+      "origin": "2300 1500 48",
+      "message": "doors/door_metal_rusty_move1.wav",
+      "health": "5",
+      "spawnflags": "49"
+    },
+    {
+      "classname": "logic_relay",
+      "targetname": "lab_relay",
+      "OnTrigger": [
+        "lab_fire,StartFire,,0,-1",
+        "lab_particles,Start,,0,-1",
+        "lab_hint,ShowHudHint,,0,-1",
+        "lab_door,Open,,0,-1",
+        "lab_sound,PlaySound,,0,-1",
+        "lab_fire,Extinguish,,5,-1",
+        "lab_particles,Stop,,5,-1"
+      ]
+    },
+    {
+      "classname": "trigger_multiple",
+      "model": "*7",
+      "origin": "0 0 0",
+      "targetname": "lab_trigger",
+      "spawnflags": "1",
+      "wait": "8",
+      "OnStartTouch": "lab_relay,Trigger,,0,-1"
+    },
+    {
+      "classname": "trigger_hurt",
+      "model": "*8",
+      "origin": "0 0 0",
+      "targetname": "lab_hurt",
+      "spawnflags": "1",
+      "damage": "5",
+      "damagetype": "8"
+    },
+    {
+      "classname": "trigger_once",
+      "model": "*9",
+      "origin": "0 0 0",
+      "targetname": "lab_once",
+      "spawnflags": "1",
+      "OnStartTouch": "lab_hint,ShowHudHint,,0,-1"
+    },
+    {
+      "classname": "info_changelevel",
+      "model": "*10",
+      "origin": "0 0 0",
+      "targetname": "lab_exit",
+      "map": "c1m1_hotel",
+      "landmark": "lab_landmark"
+    },
+    {
+      "classname": "prop_door_rotating_checkpoint",
+      "targetname": "lab_checkpoint",
+      "origin": "3750 2640 0",
+      "angles": "0 90 0",
+      "model": "models/props_doors/checkpoint_door_-02.mdl",
+      "spawnpos": "0",
+      "speed": "180",
+      "distance": "90",
+      "returndelay": "-1",
+      "hardware": "1"
+    },
+    {
+      "classname": "info_target",
+      "targetname": "lab_drip_ground",
+      "origin": "2100 1800 4"
+    },
+    {
+      "classname": "info_particle_system",
+      "origin": "2100 1800 160",
+      "effect_name": "skyscraper_drips_h",
+      "start_active": "1",
+      "cpoint1": "lab_drip_ground"
+    }
+  ],
+  "stations": [
+    {
+      "name": "Weapons / medical items",
+      "origin": [
+        128,
+        128,
+        4
+      ]
+    },
+    {
+      "name": "Animation stage / combat",
+      "origin": [
+        1850,
+        2300,
+        4
+      ]
+    },
+    {
+      "name": "Door / glass / physics",
+      "origin": [
+        3050,
+        950,
+        4
+      ]
+    },
+    {
+      "name": "Triggers / fire / sounds",
+      "origin": [
+        2150,
+        1260,
+        4
+      ]
+    },
+    {
+      "name": "Stairs / crouch / jumping",
+      "origin": [
+        2550,
+        2320,
+        4
+      ]
+    },
+    {
+      "name": "Reset / return",
+      "origin": [
+        3600,
+        2750,
+        4
+      ]
+    }
+  ]
+}

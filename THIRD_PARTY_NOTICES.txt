@@ -1,0 +1,4 @@
+Squirrel: MIT, copyright Alberto Demichelis. See vendor/squirrel/COPYRIGHT and vendor/SQUIRREL_PROVENANCE.json.
+Bevy-derived shader code: license retained at assets/shaders/BEVY_LICENSE.txt.
+Format/game modules (vendor/l4d2r-formats, vendor/l4d2r-game): owned by the project owner and licensed with L4D2R under Apache-2.0. Provenance and source hashes: vendor/L4D2R_PROVENANCE.json.
+Cargo dependencies retain their upstream licenses; no downloaded crate sources or binaries are bundled.
