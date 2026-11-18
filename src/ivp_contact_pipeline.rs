@@ -121,6 +121,7 @@ impl RetainedContact {
         if prepared.axes.bodies!=owners||prepared.geometry.state!=state.refresh{return Err("prepared admission state/owners disagree");}
         let mut out=Self::from_state(state,owners)?;out.prepared=Some(prepared);Ok(out)
     }
+    pub(crate) fn set_response_bound(&mut self,bound:f32)->Result<(),&'static str>{if !bound.is_finite()||bound<0.{return Err("invalid refreshed mass bound");}self.state.response_bound=bound;Ok(())}
     pub(crate) fn state(&self)->RetainedState{self.state}
     pub(crate) fn is_retired(&self)->bool{self.retired}
     pub(crate) fn geometry(&self)->Option<&refresh::Output>{self.prepared.as_ref().map(PreparedContact::geometry)}

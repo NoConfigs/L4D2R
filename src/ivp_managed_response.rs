@@ -11,6 +11,9 @@ use crate::{ivp_contact::Core,ivp_contact_pipeline::{CoreFrame,PreparedContact,R
 /// Compact-feature rotation over the native five-millisecond scoring horizon.
 ///10103c10 retains the cosine, products and accumulation until the float store.
 fn compact_wave_bound(angular:[Vec3;2],radii:[f32;2],compact:[bool;2],inverse_dt:f32)->f32{
+    compact_rotation_bound(angular,radii,compact,inverse_dt,None)
+}
+fn compact_rotation_bound(angular:[Vec3;2],radii:[f32;2],compact:[bool;2],inverse_dt:f32,initial_bias:Option<f32>)->f32{
     let horizon=f32::from_bits(0x3ba3d70a);
     let squared=angular.map(|v|((((v.x*v.x+v.y*v.y)+v.z*v.z)*horizon)*horizon).min(0.25));
     #[cfg(any(target_arch="x86",target_arch="x86_64"))]
@@ -21,10 +24,13 @@ fn compact_wave_bound(angular:[Vec3;2],radii:[f32;2],compact:[bool;2],inverse_dt
             "fmul dword ptr [{radius}]","fmul dword ptr [{inverse}]","fld tbyte ptr [{sum}]","faddp st(1), st(0)","fstp tbyte ptr [{sum}]",
             angle=in(reg)&squared[side],radius=in(reg)&radii[side],inverse=in(reg)&inverse_dt,sum=in(reg)&mut accumulated,
             options(nostack,preserves_flags));}}}
-        unsafe{core::arch::asm!("fld tbyte ptr [{sum}]","fstp dword ptr [{out}]",sum=in(reg)&accumulated,out=in(reg)&mut out,options(nostack,preserves_flags));}out
+        if let Some(bias)=initial_bias{
+            //10104719 adds the distance bias and doubles BEFORE spilling.
+            unsafe{core::arch::asm!("fld tbyte ptr [{sum}]","fadd dword ptr [{bias}]","fadd st(0), st(0)","fstp dword ptr [{out}]",sum=in(reg)&accumulated,bias=in(reg)&bias,out=in(reg)&mut out,options(nostack,preserves_flags));}
+        }else{unsafe{core::arch::asm!("fld tbyte ptr [{sum}]","fstp dword ptr [{out}]",sum=in(reg)&accumulated,out=in(reg)&mut out,options(nostack,preserves_flags));}}out
     }
     #[cfg(not(any(target_arch="x86",target_arch="x86_64")))]
-    {let mut accumulated=0f64;for side in 0..2{if compact[side]{accumulated=(1.-(squared[side] as f64).sqrt().cos())*radii[side] as f64*inverse_dt as f64+accumulated;}}accumulated as f32}
+    {let mut accumulated=0f64;for side in 0..2{if compact[side]{accumulated=(1.-(squared[side] as f64).sqrt().cos())*radii[side] as f64*inverse_dt as f64+accumulated;}}if let Some(bias)=initial_bias{((accumulated+bias as f64)*2.) as f32}else{accumulated as f32}}
 }
 
 #[derive(Clone,Copy)]
@@ -46,14 +52,14 @@ impl Bodies{
 #[derive(Clone,Copy)]
 pub(crate) struct Object {pub core:usize,pub rotation:[Vec3;3],pub translation:Vec3,pub radius:f32,pub material_flags:u32,pub friction:f32}
 #[derive(Clone)]
-pub(crate) struct Feature {pub endpoint:Endpoint,pub vertices:[Vec3;3],pub canonical:[Vec3;3]}
+pub(crate) struct Feature {pub endpoint:Endpoint,pub vertices:[Vec3;3],pub canonical:[Vec3;3],pub material_code:u8}
 impl Feature {
     /// Keep lookup identity and numerical geometry on the same authored edge.
     /// These are local IVP vertices; world transforms come from retained caches.
     pub(crate) fn from_compact(object:u64,ledge_key:u32,convex:&l4d2_formats::phy::Convex,kind:i16,edge:l4d2_formats::phy::CompactEdgeId)->Result<Self,&'static str>{
         let feature=crate::ivp_create::from_compact(kind,ledge_key,convex,edge)?;
         let shape=refresh::Shape::from_compact(kind,Some((convex,edge)),[Vec3::X,Vec3::Y,Vec3::Z],Vec3::ZERO,0.)?;
-        Ok(Self{endpoint:Endpoint{object,feature},vertices:shape.vertices,canonical:shape.canonical})
+        Ok(Self{endpoint:Endpoint{object,feature},vertices:shape.vertices,canonical:shape.canonical,material_code:convex.triangle_headers[edge.triangle].material_index()})
     }
 }
 #[derive(Clone,Copy)]
@@ -68,7 +74,7 @@ struct PairWork {coefficient:f32,environment_work:f32,blocked:Vec<bool>,settings
 struct Contact {features:[Feature;2],retained:RetainedContact,friction:f32,mode:u8,phase:Phase,impact_pushes:u16,impact_valid:bool,impact_rescue:f32,impact_score:f32}
 #[derive(Clone)]
 pub(crate) struct ResponseWorld {
-    managed:Managed,bodies:Bodies,objects:BTreeMap<u64,Object>,contacts:BTreeMap<u64,Contact>,
+    managed:Managed,bodies:Bodies,objects:BTreeMap<u64,Object>,contacts:BTreeMap<u64,Contact>,object_materials:BTreeMap<u64,i32>,materials:Option<crate::ivp_material_backend::ContactMaterials>,
     work:Option<PairWork>,energy:Option<(Vec<crate::ivp_batch_normal::Physical>,f32,f32)>,reports:[usize;3],settings:Settings,now:f64,effects:Vec<Effect>,released:Vec<usize>,released_features:Vec<[Endpoint;2]>,
 }
 fn rows(m:Mat3)->[Vec3;3]{let t=m.transpose();[t.x_axis,t.y_axis,t.z_axis]}
@@ -86,7 +92,7 @@ impl ResponseWorld {
             ||o.material_flags!=0||!o.friction.is_finite(){return Err("unsupported/invalid ordinary contact object");}}
         let fixed=bodies.iter().enumerate().map(|(i,b)|(i,b.flags&2!=0)).collect();
         let managed=Managed::new(registry,fixed,objects.iter().map(|(&id,o)|(id,o.core)).collect(),settings.admission)?;
-        Ok(Self{managed,bodies:Bodies::Authored(bodies),objects,contacts:BTreeMap::new(),work:None,energy:None,reports:[0;3],settings,now,effects:vec![],released:vec![],released_features:vec![]})
+        Ok(Self{managed,bodies:Bodies::Authored(bodies),objects,contacts:BTreeMap::new(),object_materials:BTreeMap::new(),materials:None,work:None,energy:None,reports:[0;3],settings,now,effects:vec![],released:vec![],released_features:vec![]})
     }
     pub(crate) fn new_physical(registry:Registry,bodies:Vec<crate::ivp_joint_apply::Body>,objects:BTreeMap<u64,Object>,settings:Settings,now:f64)->Result<Self,&'static str>{
         let view=Bodies::Physical(bodies);let boundary=view.iter().collect();let mut world=Self::new(registry,boundary,objects,settings,now)?;
@@ -143,6 +149,46 @@ impl ResponseWorld {
         Ok((c.features.each_ref().map(|f|self.objects[&f.endpoint.object].core),c.retained.geometry().ok_or("impact contact lacks prepared geometry")?.clone(),c.friction,c.impact_pushes))
     }
     pub(crate) fn impact_objects(&self,key:u64)->Result<[u64;2],&'static str>{Ok(self.contacts.get(&key).ok_or("unknown impact cache contact")?.features.each_ref().map(|f|f.endpoint.object))}
+    pub(crate) fn set_feature_materials(&mut self,materials:crate::ivp_material_backend::ContactMaterials){self.materials=Some(materials);}
+    pub(crate) fn set_object_material(&mut self,object:u64,index:i32)->Result<(),&'static str>{
+        if !self.objects.contains_key(&object){return Err("unknown material object");}
+        self.materials.as_ref().ok_or("object material requires a registry binding")?.resolve_object(index)?;
+        self.object_materials.insert(object,index);Ok(())
+    }
+    pub(crate) fn object_material(&self,object:u64)->Option<i32>{self.object_materials.get(&object).copied()}
+    pub(crate) fn material_recheck_contacts(&self,object:u64)->Result<Vec<u64>,&'static str>{self.managed.object_contacts(object)}
+    pub(crate) fn mark_material_system_dirty(&mut self,key:u64)->Result<(),&'static str>{self.managed.mark_material_system_dirty(key)}
+
+    #[cfg(test)]
+    pub(crate) fn material_system_snapshot(&self,object:u64)->serde_json::Value{
+        let owner=self.managed.owner();serde_json::json!(self.managed.object_contacts(object).unwrap().iter().map(|key|{
+            let system=owner.binding(*key as usize).unwrap().system;
+            serde_json::json!({"objects":self.impact_objects(*key).unwrap().map(|id|id-1),"dirty":u8::from(owner.system_dirty(system).unwrap()),"contacts":owner.system_pairs(system).unwrap().iter().map(|p|p.contacts.len()).sum::<usize>(),"cores":owner.system_cores(system).unwrap()})
+        }).collect::<Vec<_>>())
+    }
+
+    pub(crate) fn reset_material_unit_clocks(&mut self,core:usize)->Result<(),&'static str>{self.managed.reset_registered_unit_clocks(core)?;self.drain_physical_effects();Ok(())}
+    ///100f1800/100f1680 rebuild caches and mass bounds without retiring
+    /// persistent contacts or resetting their numerical history.
+    pub(crate) fn rebuild_material_contact(&mut self,key:u64)->Result<(),&'static str>{
+        let features=self.contacts.get(&key).ok_or("unknown material recheck contact")?.features.clone();let shapes=features.each_ref().map(|f|self.shape(f));let bodies=self.refresh_bodies(&features);let materials=self.feature_materials(&features)?;let friction=self.feature_friction(&features)?;
+        let c=self.contacts.get_mut(&key).unwrap();let g=c.retained.refresh(shapes,bodies,self.now,&self.settings.refresh,||{})?;
+        let bound=mass::setup(c.mode,std::array::from_fn(|side|mass::Core{flags:bodies[side].flags,inverse_mass:bodies[side].inverse_mass,inverse_inertia:bodies[side].inverse_inertia,arm:g.arms[side]}),std::array::from_fn(|side|mass::Endpoint{manager:0,code:features[side].material_code,default:mass::Material{key:materials[side].map(|m|m.key).unwrap_or(side as u32),flags:0}}),|_,side,_|mass::Material{key:materials[side].unwrap().key,flags:0})?;
+        c.retained.set_response_bound(bound.bound)?;c.mode=bound.mode;c.friction=friction;c.impact_pushes=0;c.impact_valid=false;Ok(())
+    }
+    fn feature_materials(&self,features:&[Feature;2])->Result<[Option<crate::ivp_material_backend::ContactMaterial>;2],&'static str>{
+        let values=features.each_ref().map(|f|if f.material_code==0{
+            match self.object_materials.get(&f.endpoint.object){Some(&index)=>self.materials.as_ref().ok_or("object material lacks its registry")?.resolve_object(index).map(Some),None=>Ok(None)}
+        }else{self.materials.as_ref().ok_or("nonzero feature material has no registry")?.resolve(f.material_code).map(Some)});
+        Ok([values[0]?,values[1]?])
+    }
+    fn feature_friction(&self,features:&[Feature;2])->Result<f32,&'static str>{
+        let materials=self.feature_materials(features)?;let coefficients=std::array::from_fn::<_,2,_>(|side|materials[side].map(|m|m.friction).unwrap_or(self.objects[&features[side].endpoint.object].friction));
+        Ok(crate::ivp_material::clamped_product(coefficients[0],coefficients[1]) as f32)
+    }
+    pub(crate) fn impact_feature_elasticities(&self,key:u64)->Result<[Option<f32>;2],&'static str>{
+        Ok(self.feature_materials(&self.contacts.get(&key).ok_or("unknown impact material contact")?.features)?.map(|m|m.map(|m|m.elasticity)))
+    }
     /// Object/core cache access order used by the next refresh controller.
     pub(crate) fn refresh_cache_cores(&self,system:usize)->Result<Vec<usize>,&'static str>{
         let pairs=self.managed.owner().system_pairs(system)?;let mut cores=vec![];
@@ -154,13 +200,13 @@ impl ResponseWorld {
     pub(crate) fn refresh_impact_contacts(&mut self,keys:&[usize])->Result<Vec<usize>,&'static str>{
         let mut retired=vec![];
         for &key in keys.iter().rev(){let key=key as u64;let f=self.contacts.get(&key).ok_or("unknown wave refresh contact")?.features.clone();
-            let shapes=f.each_ref().map(|f|self.shape(f));let bodies=self.refresh_bodies(&f);let c=self.contacts.get_mut(&key).unwrap();let g=c.retained.refresh(shapes,bodies,self.now,&self.settings.refresh,||{})?;
+            let shapes=f.each_ref().map(|f|self.shape(f));let bodies=self.refresh_bodies(&f);let friction=self.feature_friction(&f)?;let c=self.contacts.get_mut(&key).unwrap();let g=c.retained.refresh(shapes,bodies,self.now,&self.settings.refresh,||{})?;
             if g.geometry.status==1{
                 self.managed.remove(key)?;self.contacts.remove(&key);self.drain_physical_effects();retired.push(key as usize);continue;
             }
             //10102f60 allocates a new10105650 cache. Its push count and
             //valid marker belong to that allocation, not the persistent contact.
-            c.impact_pushes=0;c.impact_valid=false;
+            c.friction=friction;c.impact_pushes=0;c.impact_valid=false;
         }Ok(retired)
     }
     pub(crate) fn invalidate_impact_core(&mut self,system:usize,core:usize)->Result<(),&'static str>{
@@ -184,13 +230,21 @@ impl ResponseWorld {
         let c=self.contacts.get_mut(&key).unwrap();c.impact_score=score;c.impact_rescue=rescue;c.impact_valid=true;Ok(score)
     }
     pub(crate) fn wave_impact_bias(&self,key:u64)->Result<f32,&'static str>{let c=self.contacts.get(&key).ok_or("unknown wave bias contact")?;if !c.impact_valid{return Err("wave response lacks a scored cache");}Ok(c.impact_rescue)}
+    ///101045e0/10102930 also include compact rotation in the first response.
+    pub(crate) fn initial_impact_bias(&self,key:u64,dt:f32,radii:[f32;2])->Result<f32,&'static str>{
+        let c=self.contacts.get(&key).ok_or("unknown initial impact contact")?;
+        let (ids,g,_,_)=self.impact_contact(key)?;
+        let target=f32::from_bits(1003486810);let bias=if g.distance<target{(target-g.distance)*dt.recip()}else{0.};
+        let compact=std::array::from_fn(|side|g.active[side]&&c.features[side].endpoint.feature.kind!=3);
+        Ok(compact_rotation_bound(ids.map(|id|self.bodies.get(id).core.angular),radii,compact,dt.recip(),Some(bias)))
+    }
     fn shape(&self,f:&Feature)->refresh::Shape{let o=self.objects[&f.endpoint.object];refresh::Shape{kind:f.endpoint.feature.kind,vertices:f.vertices,canonical:f.canonical,rotation:o.rotation,translation:o.translation,radius:o.radius}}
     fn refresh_bodies(&self,features:&[Feature;2])->[refresh::Body;2]{features.each_ref().map(|f|{let b=self.bodies.get(self.objects[&f.endpoint.object].core);refresh::Body{flags:b.flags,inverse_mass:b.core.inverse_mass,inverse_inertia:b.core.inverse_inertia,rotation:rows(b.frame.rotation),position:b.frame.position,linear:b.core.linear,angular:b.core.angular}})}
     fn drain_physical_effects(&mut self){let(effects,contacts,features)=self.managed.take_effects();for e in &effects{if let Effect::ResetClock(core)=*e{self.bodies.reset_stamps(core,self.now);}}self.effects.extend(effects);self.released.extend(contacts);self.released_features.extend(features);}
     pub(crate) fn core_has_contact_system(&self,core:usize)->bool{self.managed.owner().first_system(core).is_some()}
     pub(crate) fn resolve(&mut self,flags:u32,features:[Feature;2],hint:Option<usize>)->Result<Option<u64>,&'static str>{Ok(self.resolve_created(flags,features,hint)?.0)}
     pub(crate) fn resolve_created(&mut self,flags:u32,features:[Feature;2],hint:Option<usize>)->Result<(Option<u64>,bool),&'static str>{
-        for f in &features{if !self.objects.contains_key(&f.endpoint.object)||f.vertices.iter().chain(&f.canonical).any(|v|!v.is_finite())
+        for f in &features{if !self.objects.contains_key(&f.endpoint.object)||f.material_code>127||f.vertices.iter().chain(&f.canonical).any(|v|!v.is_finite())
             ||f.endpoint.feature.kind==2&&f.endpoint.feature.vertices!=f.vertices{return Err("invalid managed response feature");}}
         let selector=((flags>>8)&3) as usize;if selector>1{return Err("invalid contact response selector");}
         let selected=[features[selector].clone(),features[selector^1].clone()];if selected[0].endpoint.feature.kind==2{return Err("face-first refresh is unsupported");}
@@ -200,17 +254,19 @@ impl ResponseWorld {
                 let initial=admission.initial.ok_or("missing contact constructor state")?;
                 let owners=selected.each_ref().map(|f|{let i=next.objects[&f.endpoint.object].core;(next.bodies.get(i).flags&2==0).then_some(i)});
                 let prepared=PreparedContact::prepare(refresh::State{time:initial.time,mix:initial.mix,marker:initial.marker,counter:initial.counter},selected.each_ref().map(|f|next.shape(f)),next.refresh_bodies(&selected),owners,next.now,&next.settings.refresh,||{})?;
-                let geometry=prepared.geometry();let bound=mass::setup(initial.mode,std::array::from_fn(|side|{let b=next.bodies.get(next.objects[&selected[side].endpoint.object].core);mass::Core{flags:b.flags,inverse_mass:b.core.inverse_mass,inverse_inertia:b.core.inverse_inertia,arm:geometry.arms[side]}}),std::array::from_fn(|side|mass::Endpoint{manager:side as u32,code:0,default:mass::Material{key:side as u32,flags:0}}),|_,_,_|unreachable!())?;
-                let friction=crate::ivp_material::clamped_product(next.objects[&selected[0].endpoint.object].friction,next.objects[&selected[1].endpoint.object].friction) as f32;
+                let materials=next.feature_materials(&selected)?;
+                let geometry=prepared.geometry();let bound=mass::setup(initial.mode,std::array::from_fn(|side|{let b=next.bodies.get(next.objects[&selected[side].endpoint.object].core);mass::Core{flags:b.flags,inverse_mass:b.core.inverse_mass,inverse_inertia:b.core.inverse_inertia,arm:geometry.arms[side]}}),std::array::from_fn(|side|mass::Endpoint{manager:0,code:selected[side].material_code,default:mass::Material{key:side as u32,flags:0}}),|_,side,_|mass::Material{key:materials[side].unwrap().key,flags:0})?;
+                let friction=next.feature_friction(&selected)?;
                 let retained=RetainedContact::from_prepared(RetainedState{refresh:geometry.state,normal:History{force:initial.force,counter:initial.sign as i16},energy:initial.energy,work:initial.work,response_bound:bound.bound},owners,prepared)?;
                 next.contacts.insert(key,Contact{features:selected,retained,friction,mode:bound.mode,phase:Phase::Refresh,impact_pushes:0,impact_valid:false,impact_rescue:0.,impact_score:0.});
             }else{
                 //10104010 refreshes a lookup hit, but preserves its existing
                 // endpoint descriptors, mass bound and numerical history.
                 let stored=next.contacts.get(&key).ok_or("metadata lacks numerical contact")?.features.clone();let shapes=stored.each_ref().map(|f|next.shape(f));let bodies=next.refresh_bodies(&stored);
+                let friction=next.feature_friction(&stored)?;
                 let c=next.contacts.get_mut(&key).unwrap();c.retained.refresh(shapes,bodies,next.now,&next.settings.refresh,||{})?;
                 // Lookup admission also allocates10105650's fresh transient cache.
-                c.impact_pushes=0;c.impact_valid=false;
+                c.friction=friction;c.impact_pushes=0;c.impact_valid=false;
             }
         }
         next.drain_physical_effects();*self=next;Ok((admission.key,admission.created))
@@ -370,13 +426,18 @@ impl ResponseWorld {
         let Bodies::Physical(bodies)=&mut self.bodies else{return Err("physical dispatch requires full body bank");};
         self.managed.finish_unit_dispatch(work,|id|classify(id,&mut bodies[id]))?;self.drain_physical_effects();Ok(())
     }
+    pub(crate) fn poll_physical_unit(&mut self,work:crate::ivp_unit_registry::UnitDispatch,mut classify:impl FnMut(usize,&mut crate::ivp_joint_apply::Body)->Result<u8,&'static str>)->Result<crate::ivp_unit_registry::PolledUnitDispatch,&'static str>{
+        let Bodies::Physical(bodies)=&mut self.bodies else{return Err("physical dispatch requires full body bank");};
+        let polled=self.managed.poll_unit_dispatch(work,|id|classify(id,&mut bodies[id]))?;self.drain_physical_effects();Ok(polled)
+    }
+    pub(crate) fn finish_polled_physical_unit(&mut self,work:crate::ivp_unit_registry::PolledUnitDispatch)->Result<(),&'static str>{self.managed.finish_polled_unit(work)?;self.drain_physical_effects();Ok(())}
     pub(crate) fn registry(&self)->&Registry{self.managed.owner().registry()}
     pub(crate) fn system_ids(&self)->Vec<usize>{self.managed.owner().system_ids()}
     #[cfg(any(test,debug_assertions))]
     pub(crate) fn world_snapshot(&self)->serde_json::Value{let ids=self.system_ids();serde_json::json!({"bodies":self.snapshot(1)["bodies"],"environment_work":self.work.as_ref().map(|w|w.environment_work).unwrap_or(0.),"systems":(0..self.managed.owner().system_slots()).map(|id|ids.contains(&id).then(||self.pipeline_snapshot(id))).collect::<Vec<_>>()})}
     pub(crate) fn take_effects(&mut self)->(Vec<Effect>,Vec<usize>,Vec<[Endpoint;2]>){(std::mem::take(&mut self.effects),std::mem::take(&mut self.released),std::mem::take(&mut self.released_features))}
     #[cfg(test)]
-    pub(crate) fn body_owners_snapshot(&self)->serde_json::Value{serde_json::json!({"energy":self.energy.as_ref().map(|(v,_,_)|v.iter().map(|p|serde_json::json!({"flags":p.flags,"mass":p.mass.to_bits(),"inertia":p.inertia.to_array().map(f32::to_bits)})).collect::<Vec<_>>()),"blocked":self.work.as_ref().map(|w|&w.blocked),"objects":self.objects.iter().map(|(id,o)|serde_json::json!({"id":id,"core":o.core,"rotation":o.rotation.map(|v|v.to_array().map(f32::to_bits)),"translation":o.translation.to_array().map(f32::to_bits),"radius":o.radius.to_bits(),"flags":o.material_flags,"friction":o.friction.to_bits()})).collect::<Vec<_>>()})}
+    pub(crate) fn body_owners_snapshot(&self)->serde_json::Value{serde_json::json!({"object_materials":self.object_materials,"energy":self.energy.as_ref().map(|(v,_,_)|v.iter().map(|p|serde_json::json!({"flags":p.flags,"mass":p.mass.to_bits(),"inertia":p.inertia.to_array().map(f32::to_bits)})).collect::<Vec<_>>()),"blocked":self.work.as_ref().map(|w|&w.blocked),"objects":self.objects.iter().map(|(id,o)|serde_json::json!({"id":id,"core":o.core,"rotation":o.rotation.map(|v|v.to_array().map(f32::to_bits)),"translation":o.translation.to_array().map(f32::to_bits),"radius":o.radius.to_bits(),"flags":o.material_flags,"friction":o.friction.to_bits()})).collect::<Vec<_>>()})}
     #[cfg(test)]
     pub(crate) fn impact_snapshot(&self)->serde_json::Value{serde_json::json!(self.contacts.iter().map(|(&key,c)|serde_json::json!({"key":key,"valid":c.impact_valid,"rescue":c.impact_rescue.to_bits(),"score":c.impact_score.to_bits(),"pushes":c.impact_pushes})).collect::<Vec<_>>())}
     #[cfg(any(test,debug_assertions))]

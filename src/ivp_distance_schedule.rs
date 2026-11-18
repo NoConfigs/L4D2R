@@ -48,6 +48,13 @@ pub(crate) struct Input {
 #[derive(Debug)]
 pub(crate) enum Action {Skip,Feature{total_bound:f32,closing_bound:f32},Hull{keys:[f32;2],linear_delta:f32}}
 pub(crate) struct Decision {pub flags:u32,pub counter:u32,pub action:Action}
+///1010a976..1010aa04 completes each endpoint's SSE rate/accumulated
+/// expression before adding those two rounded deltas. The flattened
+/// decompiler expression changes cancellation rounding in live glancing pairs.
+fn hull_linear_delta(now:f64,budgets:[Budget;2])->f32{
+ let delta=|k:usize|{let b=budgets[k];let elapsed=(now-b.time) as f32;(b.rates[0]-b.rates[1])*elapsed+(b.accumulated[0]-b.accumulated[1])};
+ delta(1)+delta(0)
+}
 pub(crate) fn prepare(i:&Input)->Result<Decision,&'static str>{
  if ![i.now,i.deadline].iter().all(|v|v.is_finite())||!i.normal.is_finite()||![i.dt,i.distance,i.target,i.slow_gate].iter().all(|v|v.is_finite())||i.now>i.deadline||i.dt<=0.{return Err("invalid distance scheduling inputs");}
  let selector=((i.flags>>8)&3) as usize;if selector>1{return Err("invalid selected pair side");}
@@ -64,10 +71,7 @@ pub(crate) fn prepare(i:&Input)->Result<Decision,&'static str>{
         }
         let elapsed=i.budgets.map(|b|(i.now-b.time) as f32);
         let keys=std::array::from_fn(|k|(elapsed[k]*i.budgets[k].rates[0]+i.budgets[k].accumulated[0])+shares[k]);
-        let delta=|k:usize|(i.budgets[k].rates[0]-i.budgets[k].rates[1])*elapsed[k]+(i.budgets[k].accumulated[0]-i.budgets[k].accumulated[1]);
-        // Native adds the first object's rate product then its accumulated
-        // difference to the second object's completed delta.
-        let linear_delta=(delta(1)+(i.budgets[0].rates[0]-i.budgets[0].rates[1])*elapsed[0])+(i.budgets[0].accumulated[0]-i.budgets[0].accumulated[1]);
+        let linear_delta=hull_linear_delta(i.now,i.budgets);
         out.flags=(i.flags&0xffd7ffff)|0x140000;out.action=Action::Hull{keys,linear_delta};
     }return Ok(out);
  }
@@ -106,6 +110,13 @@ pub(crate) fn captured_input(s:&serde_json::Value)->Input{
 }
 #[cfg(test)]
 mod tests{
+ #[test]
+ fn native_live_hull_endpoint_deltas_complete_before_pair_addition(){
+  let data:serde_json::Value=serde_json::from_str(include_str!("../tools/fixtures/native-ivp-hull-linear-delta.json")).unwrap();let f=|v:&serde_json::Value|f32::from_bits(v.as_u64().unwrap() as u32);
+  for (i,row) in data["cases"].as_array().unwrap().iter().enumerate(){let budgets=std::array::from_fn(|k|{let b=&row["budgets"][k];Budget{time:f64::from_bits(b["time"].as_u64().unwrap()),rates:std::array::from_fn(|j|f(&b["rates"][j])),accumulated:std::array::from_fn(|j|f(&b["accumulated"][j])),flags:0}});assert_eq!(hull_linear_delta(f64::from_bits(row["now"].as_u64().unwrap()),budgets).to_bits() as u64,row["delta"].as_u64().unwrap(),"native hull row{i}");}
+  assert_eq!(data["cases"].as_array().unwrap().len(),646);
+ }
+
  use super::*;
  #[test]
  fn public_gravity_rebuilds_the_native_distance_profile(){

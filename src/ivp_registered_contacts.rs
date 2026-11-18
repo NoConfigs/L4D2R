@@ -27,6 +27,9 @@ pub(crate) struct PrimaryImpact{pub kernel:crate::ivp_impact::Outcome,pub deferr
 pub(crate) struct AdmittedContact{pub key:u64,pub saved:Vec<crate::ivp_impact_state::Saved>}
 pub(crate) type AdmittedSphere=AdmittedContact;
 impl CollisionContext<'_>{
+ pub(crate) fn take_object_notifications(&mut self)->Vec<usize>{std::mem::take(&mut self.state.object_notifications)}
+ pub(crate) fn pending_cores(&self)->Vec<usize>{self.state.response.registry().pending_cores().to_vec()}
+
  #[cfg(test)]
  pub(crate) fn contacts_for_observer(&self)->&ResponseWorld{&self.state.response}
  pub(crate) fn current_time(&self)->f64{self.now}
@@ -70,14 +73,14 @@ impl CollisionContext<'_>{
   let motion=crate::ivp_motion::PredictionMotion{time:now,dt:remaining,delta:result.delta,rotation:b.current.rotation,inverse_dt:b.prediction.inverse_dt};
   self.state.prediction_motion.insert(id,motion);Ok(())
  }
- pub(crate) fn has_impact_elasticities(&self,key:u64)->Result<bool,&'static str>{Ok(self.state.response.impact_objects(key)?.into_iter().all(|object|self.state.elasticities.contains_key(&object)))}
+ pub(crate) fn has_impact_elasticities(&self,key:u64)->Result<bool,&'static str>{let objects=self.state.response.impact_objects(key)?;let features=self.state.response.impact_feature_elasticities(key)?;Ok((0..2).all(|side|features[side].is_some()||self.state.elasticities.contains_key(&objects[side])))}
  ///100fdf50 admits a newly close neighbour before impact staging, then
  ///100f0460 resets that neighbour's movement clocks only for a new contact.
  pub(crate) fn core_has_contact_system(&self,id:usize)->bool{self.state.response.core_has_contact_system(id)}
  pub(crate) fn admit_wake_neighbour(&mut self,flags:u32,cores:[usize;2],cached:[crate::ivp_motion::PreparedObjectCache;2],waking:usize,other:usize)->Result<(),&'static str>{
   let mut objects=[0;2];
   for side in 0..2{let found=self.state.contact_cores.iter().filter_map(|(&o,&c)|(c==cores[side]).then_some(o)).collect::<Vec<_>>();if found.len()!=1{return Err("wake admission requires one object per core");}objects[side]=found[0];}
-  let features=objects.map(|object|Feature{endpoint:crate::ivp_create::Endpoint{object,feature:crate::ivp_create::Feature{kind:3,edge:0,opposite:0,triangle:0,ledge:0,vertex:0,vertices:[Vec3::ZERO;3]}},vertices:[Vec3::ZERO;3],canonical:[Vec3::ZERO;3]});
+  let features=objects.map(|object|Feature{material_code:0,endpoint:crate::ivp_create::Endpoint{object,feature:crate::ivp_create::Feature{kind:3,edge:0,opposite:0,triangle:0,ledge:0,vertex:0,vertices:[Vec3::ZERO;3]}},vertices:[Vec3::ZERO;3],canonical:[Vec3::ZERO;3]});
   self.admit_wake_features(flags,features,cached,waking,other).map(|_|())
  }
  ///10104010 consumes the retained mindist features for compact neighbours too.
@@ -137,7 +140,7 @@ impl CollisionContext<'_>{
   self.primary_impact_inner(key,None)
  }
  /// Neighbour pushes consume the rescue term prepared by10103c10, including
- /// compact rotation. The initial impact has only the separation bias.
+ /// compact rotation. The initial impact computes its own retained rotation term.
  pub(crate) fn primary_wave_impact(&mut self,key:u64)->Result<PrimaryImpact,&'static str>{
   let bias=self.state.response.wave_impact_bias(key)?;self.primary_impact_inner(key,Some(bias))
  }
@@ -147,13 +150,15 @@ impl CollisionContext<'_>{
   let mut audit=if PRIMARY_AUDIT.with(|a|a.borrow().is_some()){
    Some(serde_json::json!({"key":key,"time":self.now.to_bits(),"cores":cores,"counts_before":(0..self.bodies()?.len()).map(|id|self.state.impact_counts[&id]).collect::<Vec<_>>(),"before":self.bodies()?.iter().copied().map(crate::ivp_joint_apply::tests::snapshot).collect::<Vec<_>>(),"normal":g.normal.to_array().map(f32::to_bits),"friction":friction.to_bits(),"pushes":pushes}))
   }else{None};
-  let coefficients=self.state.response.impact_objects(key)?.map(|object|self.state.elasticities.get(&object).copied().ok_or("immediate response lacks explicit object elasticity"));let coefficients=[coefficients[0]?,coefficients[1]?];
+  let objects=self.state.response.impact_objects(key)?;let features=self.state.response.impact_feature_elasticities(key)?;
+  let coefficients=std::array::from_fn::<_,2,_>(|side|features[side].or_else(||self.state.elasticities.get(&objects[side]).copied()).ok_or("immediate response lacks explicit object elasticity"));let coefficients=[coefficients[0]?,coefficients[1]?];
   let energy=crate::ivp_material::clamped_product(coefficients[0],coefficients[1]) as f32;
   let bodies=self.state.response.physical_bodies()?;
   let budget=|id:usize|->Result<crate::ivp_impact::ImpactBudget,&'static str>{Ok(crate::ivp_impact::ImpactBudget{count:*self.state.impact_counts.get(&id).ok_or("impact core lacks a constructor budget")?,flags:bodies[id].flags,limit:6})};
   let mut budgets=[budget(cores[0])?,budget(cores[1])?];
-  let dt=self.state.dt;let target=f32::from_bits(1003486810);let bias=if g.distance<target{(target-g.distance)*dt.recip()}else{0.};
-  let rescue=(f32::from_bits(1011875418)+wave_bias.unwrap_or(bias+bias))*f32::from_bits(1067030938);
+  let dt=self.state.dt;
+  let bias=match wave_bias{Some(bias)=>bias,None=>self.state.response.initial_impact_bias(key,dt,cores.map(|id|self.state.properties[&id].radius))?};
+  let rescue=(f32::from_bits(1011875418)+bias)*f32::from_bits(1067030938);
   let p=self.state.properties[&cores[0]];let q=self.state.properties[&cores[1]];
   if p.limits!=q.limits||p.angular_limit_exact.to_bits()!=q.angular_limit_exact.to_bits(){return Err("impact cores have different world caps");}
   let bodies=self.state.response.physical_bodies()?;
@@ -161,12 +166,11 @@ impl CollisionContext<'_>{
   let raw=std::array::from_fn::<_,2,_>(|side|{let b=bodies[cores[side]];let mut v=work[side];v.velocity=Vec3::from_array(b.linear[..3].try_into().unwrap());v.angular=Vec3::from_array(b.angular[..3].try_into().unwrap());v});
   let [a,b]=&mut work;let outcome=crate::ivp_impact::resolve_cores(a,b,g.normal,crate::ivp_impact::Settings{energy,friction,system_pushes:pushes as u32,rescue_speed:rescue,linear_limit:p.limits.x,angular_limit:p.limits.y,angular_limit_exact:p.angular_limit_exact}).ok_or("invalid primary impact response")?;
   let deferred=crate::ivp_impact::deferred_core(raw,work,g.normal,rescue);
-  //10102be0 cancels the deferred core's increment BEFORE its anomaly check.
-  // Register only committed cores; otherwise a deferred seventh hit would be
-  // mistaken for a hold even though native leaves its count at six.
+  //10102be0 cancels the deferred core's increment. Its committed opposite
+  // still runs10101a20, including the anomaly callback at count > limit.
+  // Skipping that callback permits an extra push before both cores are held.
   if deferred.is_some(){
-   //10102be0 jumps past BOTH anomaly callbacks after a delayed commit.
-   for side in 0..2{if deferred!=Some(side){budgets[side].count=budgets[side].count.wrapping_add(u16::from(budgets[side].flags&2==0));}}
+   for side in 0..2{if deferred!=Some(side){budgets[side].register(true);}}
   }else{for budget in &mut budgets{budget.register(true);}}
   // Default1008c670 accepts holding when no external game callback is bound.
   //10103020 transfers BOTH endpoints when either endpoint carries a decision.
@@ -198,7 +202,7 @@ impl CollisionContext<'_>{
    if matches.len()!=1{return Err("sphere impact requires one object per core");}objects[side]=matches[0];
    let frame=self.state.frames[&objects[side]];if frame.shift.is_some()||frame.rotation.is_some(){return Err("centred sphere impact has an object offset");}
   }
-  let features=objects.map(|object|Feature{endpoint:crate::ivp_create::Endpoint{object,feature:crate::ivp_create::Feature{kind:3,edge:0,opposite:0,triangle:0,ledge:0,vertex:0,vertices:[Vec3::ZERO;3]}},vertices:[Vec3::ZERO;3],canonical:[Vec3::ZERO;3]});
+  let features=objects.map(|object|Feature{material_code:0,endpoint:crate::ivp_create::Endpoint{object,feature:crate::ivp_create::Feature{kind:3,edge:0,opposite:0,triangle:0,ledge:0,vertex:0,vertices:[Vec3::ZERO;3]}},vertices:[Vec3::ZERO;3],canonical:[Vec3::ZERO;3]});
   self.admit_features_with_frames(flags,features,cached)
  }
  ///10104820 retains object geometry before staging100f04b0;101045e0 then
@@ -231,7 +235,7 @@ impl ContactWorld{
  /// Runtime defaults recovered from the owned retail environment. No fixture I/O.
  pub(crate) fn empty_native(dt:f32,seed:u32,gravity:Vec3,alternate:Vec3)->Result<Self,&'static str>{
   let epsilon=f32::from_bits(0x2edbe6ff);let area_epsilon=f64::from_bits(0x3c32725de0000000);let minimum=f32::from_bits(0x358637bd);
-  let definition=Definition{objects:BTreeMap::new(),frames:BTreeMap::new(),settings:Settings{dt,admission:crate::ivp_managed_contacts::Settings{distance:f32::from_bits(0x3c4ffe5a),area_epsilon},refresh:crate::ivp_refresh::Settings{epsilon,bary_bias:f32::from_bits(0x00800000),area_epsilon,one:1.,opposite:-1.},threshold_extra:minimum,minimum_impulse:minimum,minimum_determinant_squared:f32::from_bits(0x1e3ce509)},decay:f32::from_bits(0x3f7f8d05),initial_work:0.,blocked:vec![],dissipation:crate::ivp_dissipation::Settings{epsilon,one:1.,opposite:-1.,two:2.,half:0.5,huge:10000.,small:0.0001,fraction:0.1},allowance:f32::from_bits(0x411d47ae),energy_bound:10.};
+  let definition=Definition{objects:BTreeMap::new(),frames:BTreeMap::new(),settings:Settings{dt,admission:crate::ivp_managed_contacts::Settings{distance:f32::from_bits(0x3c4ffe5a),area_epsilon},refresh:crate::ivp_refresh::Settings{epsilon,bary_bias:f32::from_bits(0x00800000),area_epsilon,one:1.,opposite:-1.},threshold_extra:minimum,minimum_impulse:minimum,minimum_determinant_squared:f32::from_bits(0x1e3ce509)},decay:crate::ivp_dissipation::decay_for_timestep(dt),initial_work:0.,blocked:vec![],dissipation:crate::ivp_dissipation::Settings{epsilon,one:1.,opposite:-1.,two:2.,half:0.5,huge:10000.,small:0.0001,fraction:0.1},allowance:f32::from_bits(0x411d47ae),energy_bound:10.};
   crate::ivp_registered_physical::FreeWorld::with_forces(usize::MAX,&[],dt,seed,gravity,alternate)?.into_contacts(definition)
  }
  pub(crate) fn from_parts(p:Parts,d:Definition)->Result<Self,&'static str>{
@@ -305,6 +309,53 @@ impl ContactWorld{
  pub(crate) fn configure_object_elasticity(&mut self,object:u64,coefficient:f32)->Result<(),&'static str>{
   if !self.state.contact_cores.contains_key(&object)||!coefficient.is_finite(){return Err("invalid object elasticity binding");}
   self.state.elasticities.insert(object,coefficient);Ok(())
+ }
+ /// Publish a value-owned ordinary registry/remap without rewriting retained
+ /// contact friction. Subsequent impacts resolve elasticity against this table.
+ pub(crate) fn set_feature_materials(&mut self,registry:&crate::ivp_surface_registry::Registry,manager:&crate::ivp_material_backend::Manager)->Result<(),&'static str>{
+  let materials=crate::ivp_material_backend::ContactMaterials::from_registry(registry,manager)?;
+  self.state.response.set_feature_materials(materials);Ok(())
+ }
+ /// Constructor binding for the backend surface identity used by code0 features.
+ pub(crate) fn set_object_material(&mut self,object:u64,index:i32)->Result<(),&'static str>{self.state.response.set_object_material(object,index)}
+ /// Public10094cf0: same identity is a no-op; a changed identity runs the
+ /// native core/contact recheck instead of merely replacing coefficients.
+ /// The containing compact owner stages this world and the borrowed cache together.
+ pub(crate) fn prepare_material_assignment(&mut self,object:u64,index:i32)->Result<bool,&'static str>{
+  let previous=self.state.response.object_material(object).ok_or("runtime material assignment requires a bound object identity")?;
+  if previous==index{return Ok(false);}self.state.response.set_object_material(object,index)?;Ok(true)
+ }
+ /// Complete the recheck after the geometry owner has delivered any immediate
+ /// per-member wake/admission callbacks. The owner stages the whole command.
+ pub(crate) fn refresh_material_assignment_cached(&mut self,object:u64,cache:&mut crate::ivp_world_cache::WorldCache)->Result<(),&'static str>{
+  let core=*self.state.contact_cores.get(&object).ok_or("unknown public material object")?;let mut next=self.clone();
+  let fixed=next.bodies()[core].flags&2!=0;
+  if !fixed{
+   if next.bodies()[core].flags>>8>=8{next.state.response.physical_wake_now_in_candidate(core)?;}else{next.state.response.reset_material_unit_clocks(core)?;}
+   next.state.effects(next.clock.now,next.clock.deadline)?;
+   let b=&mut next.state.response.physical_bodies_mut()?[core];let old_flags=b.object_flags;b.object_flags=(b.object_flags&!255)|((b.flags>>8) as u32);if old_flags!=b.object_flags{next.state.object_notifications.push(core);}
+  }else{
+   let inverse_dt=next.state.dt.recip();let b=&mut next.state.response.physical_bodies_mut()?[core];
+   for v in [&mut b.linear,&mut b.angular,&mut b.pending_linear,&mut b.pending_angular]{v[..3].fill(0.);}
+   b.prediction.velocity=Vec3::ZERO;b.prediction.rotation_end=b.prediction.rotation_start;b.prediction.inverse_dt=inverse_dt;
+  }
+  next.state.refresh_context(next.clock.now)?;
+  let contacts=next.state.response.material_recheck_contacts(object)?;
+  for key in contacts{
+   if fixed{next.state.response.mark_material_system_dirty(key)?;let ids=next.state.response.impact_objects(key)?;for id in ids{let other=next.state.contact_cores[&id];if other!=core&&next.bodies()[other].flags&2==0{next.state.response.physical_wake_in_candidate(other)?;}}}
+   let objects=next.state.response.impact_objects(key)?;let mut cache_objects=[0;2];
+   for side in 0..2{let id=next.state.contact_cores[&objects[side]];let b=next.bodies()[id];cache.update_core(id,b.prediction)?;let object=cache.contact_object(objects[side],id)?;cache.set_flags(object,b.object_flags)?;cache_objects[side]=object;}
+   let clock=crate::ivp_world_cache::Context{time:next.clock.now,frame:next.clock.clock_serial};let leases=cache.retain_pair(cache_objects,clock)?;
+   let frames=[cache.lease_frame(&leases.0)?,cache.lease_frame(&leases.1)?];let frames=std::array::from_fn::<_,2,_>(|side|{let f=frames[side];let r=f.pose.rotation.transpose();(objects[side],[r.x_axis,r.y_axis,r.z_axis],f.pose.position)});
+   let result=cache.with_leases(leases,|_|{next.state.response.set_selected_physical_context(next.clock.now,&frames)?;next.state.response.rebuild_material_contact(key) });result?;
+  }
+  next.state.effects(next.clock.now,next.clock.deadline)?;*self=next;Ok(())
+ }
+ pub(crate) fn bind_shared_materials(&mut self,registry:&crate::ivp_material_backend::SharedSurfaceRegistry,table:&crate::ivp_material_backend::WorldMaterialTable)->Result<(),&'static str>{
+  self.state.response.set_feature_materials(registry.contact_materials(table)?);Ok(())
+ }
+ pub(crate) fn bind_world_materials(&mut self,registry:&crate::ivp_surface_registry::Registry,table:&crate::ivp_material_backend::WorldMaterialTable)->Result<(),&'static str>{
+  let materials=table.contact_materials(registry)?;self.state.response.set_feature_materials(materials);Ok(())
  }
  pub(crate) fn create_poly(&mut self,object_id:u64,parameters:crate::ivp_poly_constructor::Parameters,friction:f32)->Result<usize,&'static str>{
   let id=self.bodies().len();let created=crate::ivp_poly_constructor::construct_at(id,parameters,self.state.dt,crate::ivp_group_effects::Context{now:self.clock.now,next:self.clock.deadline})?;
@@ -396,6 +447,12 @@ impl ContactWorld{
  pub(crate) fn inspect_collision(&mut self,callback:impl FnOnce(&mut CollisionContext<'_>)->Result<(),&'static str>)->Result<(),&'static str>{
   let mut next=self.clone();callback(&mut CollisionContext{state:&mut next.state,now:next.clock.now,deadline:next.clock.deadline})?;*self=next;Ok(())
  }
+ /// Stage a synchronous public callback against the canonical physical/queue
+ /// owners. A geometry owner must stage its own metadata/cache alongside it.
+ pub(crate) fn with_candidate_context(&mut self,run:impl FnOnce(&mut CollisionContext<'_>,crate::ivp_world_cache::Context,f64,&mut crate::ivp_event_queue::Queue)->Result<(),&'static str>)->Result<(),&'static str>{
+  let mut next=self.clone();let now=next.clock.now;let deadline=next.clock.deadline;let clock=crate::ivp_world_cache::Context{time:now,frame:next.clock.clock_serial};
+  run(&mut CollisionContext{state:&mut next.state,now,deadline},clock,deadline,&mut next.clock.queue)?;*self=next;Ok(())
+ }
  pub(crate) fn advance(&mut self,delta:f32)->Result<(),&'static str>{
   self.advance_with_prediction(delta,|_,_,_,_,_|Ok(()))
  }
@@ -440,12 +497,27 @@ impl ContactWorld{
  /// The world/queue commit together on success; external owners must also stage
  /// their own metadata, just as for the read-only discovery adapter above.
  pub(crate) fn advance_with_mutable_cache_context(&mut self,delta:f32,
+  prepare:impl FnMut(&[Body],&[usize],crate::ivp_world_cache::Context)->Result<(),&'static str>,
+  predicted:impl FnMut(&mut CollisionContext<'_>,&[usize],&[usize],crate::ivp_world_cache::Context,f64,&mut crate::ivp_event_queue::Queue)->Result<(),&'static str>,
+  event:impl FnMut(&mut CollisionContext<'_>,usize,crate::ivp_world_cache::Context,f64,&mut crate::ivp_event_queue::Queue)->Result<(),&'static str>)->Result<(),&'static str>{
+  self.advance_with_unit_context(delta,prepare,|_,_,_,_,_|Ok(()),predicted,event)
+ }
+ pub(crate) fn advance_with_unit_context(&mut self,delta:f32,
+  prepare:impl FnMut(&[Body],&[usize],crate::ivp_world_cache::Context)->Result<(),&'static str>,
+  completed_unit:impl FnMut(&mut CollisionContext<'_>,&[usize],crate::ivp_world_cache::Context,f64,&mut crate::ivp_event_queue::Queue)->Result<(),&'static str>,
+  predicted:impl FnMut(&mut CollisionContext<'_>,&[usize],&[usize],crate::ivp_world_cache::Context,f64,&mut crate::ivp_event_queue::Queue)->Result<(),&'static str>,
+  event:impl FnMut(&mut CollisionContext<'_>,usize,crate::ivp_world_cache::Context,f64,&mut crate::ivp_event_queue::Queue)->Result<(),&'static str>)->Result<(),&'static str>{
+  self.advance_with_lifecycle_context(delta,prepare,|_,_,_,_|Ok(()),completed_unit,predicted,event)
+ }
+ pub(crate) fn advance_with_lifecycle_context(&mut self,delta:f32,
   mut prepare:impl FnMut(&[Body],&[usize],crate::ivp_world_cache::Context)->Result<(),&'static str>,
+  mut started:impl FnMut(&mut CollisionContext<'_>,crate::ivp_world_cache::Context,f64,&mut crate::ivp_event_queue::Queue)->Result<(),&'static str>,
+  mut completed_unit:impl FnMut(&mut CollisionContext<'_>,&[usize],crate::ivp_world_cache::Context,f64,&mut crate::ivp_event_queue::Queue)->Result<(),&'static str>,
   mut predicted:impl FnMut(&mut CollisionContext<'_>,&[usize],&[usize],crate::ivp_world_cache::Context,f64,&mut crate::ivp_event_queue::Queue)->Result<(),&'static str>,
   mut event:impl FnMut(&mut CollisionContext<'_>,usize,crate::ivp_world_cache::Context,f64,&mut crate::ivp_event_queue::Queue)->Result<(),&'static str>)->Result<(),&'static str>{
   let mut next=self.clone();next.state.prediction_calls.clear();#[cfg(any(test,debug_assertions))] next.state.calls.clear();let state=std::cell::RefCell::new(&mut next.state);
   next.clock.simulate_callbacks(delta,|queue,now,deadline,serial|{
-   let mut state=state.borrow_mut();let first=state.prediction_calls.len();state.step(now,deadline,|b,ids|prepare(b,ids,crate::ivp_world_cache::Context{time:now,frame:serial}))?;
+   let mut state=state.borrow_mut();let first=state.prediction_calls.len();state.step(now,deadline,|b,ids|prepare(b,ids,crate::ivp_world_cache::Context{time:now,frame:serial}),|context,members|match members{None=>started(context,crate::ivp_world_cache::Context{time:now,frame:serial},deadline,queue),Some(ids)=>completed_unit(context,ids,crate::ivp_world_cache::Context{time:now,frame:serial},deadline,queue)})?;
    let notices=std::mem::take(&mut state.object_notifications);
    let order=state.prediction_calls[first..].to_vec();
    predicted(&mut CollisionContext{state:&mut state,now,deadline},&order,&notices,crate::ivp_world_cache::Context{time:now,frame:serial},deadline,queue)
@@ -493,9 +565,9 @@ impl State{
   let bodies=self.response.physical_bodies_mut()?;let mut forces=cores.iter().map(|&id|{let b=bodies[id];let p=self.properties[&id];(id,crate::ivp_base_controller::Body{core:core(b),flags:b.flags as u8,movement:(b.flags>>8) as u8,linear_rate:p.linear_rate,angular_rate:p.angular_rate})}).collect();
   crate::ivp_base_controller::Controller{gravity:self.gravity,alternate:self.alternate}.execute(&mut forces,cores,self.dt)?;for (id,f) in forces{write_core(&mut bodies[id],f.core);}Ok(())
  }
- fn step(&mut self,now:f64,deadline:f64,mut prepare:impl FnMut(&[Body],&[usize])->Result<(),&'static str>)->Result<(),&'static str>{
+ fn step(&mut self,now:f64,deadline:f64,mut prepare:impl FnMut(&[Body],&[usize])->Result<(),&'static str>,mut lifecycle:impl FnMut(&mut CollisionContext<'_>,Option<&[usize]>)->Result<(),&'static str>)->Result<(),&'static str>{
   self.prediction_motion.clear();
-  self.response.set_physical_time(now)?;self.response.begin_physical_psi()?;self.effects(now,deadline)?;self.refresh_context(now)?;let mut processed=vec![];
+  self.response.set_physical_time(now)?;lifecycle(&mut CollisionContext{state:self,now,deadline},None)?;self.response.begin_physical_psi()?;self.effects(now,deadline)?;self.refresh_context(now)?;let mut processed=vec![];
   loop{
    let histories=&mut self.histories;let counts=&mut self.impact_counts;
    let work=self.response.next_physical_unit(&mut self.poll,|bodies,cores,flags|{
@@ -503,8 +575,15 @@ impl State{
     for b in values{if let Some(count)=counts.get_mut(&b.id){*count=0;}if result.reset_movement_clock{histories.get_mut(&b.id).ok_or("missing contact-world preparation history")?.reset_clock(now)?;}bodies[b.id]=b;}processed.extend(cores.iter().rev().copied());Ok(())
    })?;let Some(work)=work else{break;};
    for (key,cores) in work.controllers(){#[cfg(any(test,debug_assertions))] self.calls.push(*key);match *key{ControllerKey::Base=>self.base(cores)?,ControllerKey::Joint(id)=>self.joint(id,cores)?,ControllerKey::Contact{system,phase}=>{if phase==crate::ivp_unit_registry::ContactPhase::Refresh{let ids=self.response.refresh_cache_cores(system)?;prepare(self.response.physical_bodies()?,&ids)?;}self.response.execute_in_candidate(system,phase)?;}}}
+   //100ff090 can reset movement clocks during a contact controller.
+   // Publish those effects before100eace0 reads the movement history;
+   // otherwise its stale clocks can put a still-active unit to sleep.
+   self.effects(now,deadline)?;
    let histories=&mut self.histories;let properties=&self.properties;
-   self.response.finish_physical_unit(work,|id,b|{let h=histories.get_mut(&id).ok_or("missing contact-world polled history")?;let result=movement::classify(h,input(*b,properties[&id]),now,&settings())?;b.flags=(b.flags&0xff)|((result as u16)<<8);b.stamps=[h.close_time,h.far_time];Ok(result)})?;self.effects(now,deadline)?;
+   let members=work.cores().to_vec();
+   let polled=self.response.poll_physical_unit(work,|id,b|{let h=histories.get_mut(&id).ok_or("missing contact-world polled history")?;let result=movement::classify(h,input(*b,properties[&id]),now,&settings())?;b.flags=(b.flags&0xff)|((result as u16)<<8);b.stamps=[h.close_time,h.far_time];Ok(result)})?;self.effects(now,deadline)?;
+   lifecycle(&mut CollisionContext{state:self,now,deadline},Some(&members))?;
+   self.response.finish_polled_physical_unit(polled)?;self.effects(now,deadline)?;
   }
   self.effects(now,deadline)?;
   for id in processed.into_iter().rev(){self.prediction_calls.push(id);let b=&mut self.response.physical_bodies_mut()?[id];let p=self.properties[&id];let result=b.prediction.advance(crate::ivp_motion::MotionStep{time:now,dt:self.dt,velocity:Vec3::new(b.linear[0],b.linear[1],b.linear[2]),angular:Vec3::new(b.angular[0],b.angular[1],b.angular[2]),inertia:p.inertia,inverse_inertia:Vec3::new(b.inverse[0],b.inverse[1],b.inverse[2]),limits:p.limits,angular_limit_exact:p.angular_limit_exact,gyro:p.gyro});b.linear[..3].copy_from_slice(&b.prediction.velocity.to_array());b.angular[..3].copy_from_slice(&result.angular.to_array());
@@ -561,7 +640,7 @@ pub(crate) fn verify_rollback_controls(world:&ContactWorld){
  let mut bad=world.clone();let retained=bad.state.joints[&0].constraint_ids.clone();bad.detach_joint_group(0).unwrap();assert!(retained.iter().all(|id|bad.state.retired_constraints.contains(id)));let before=snapshot(&bad);assert!(bad.detach_joint_group(0).is_err());assert_eq!(snapshot(&bad),before);
  let mut bad=world.clone();bad.state.joints.get_mut(&0).unwrap().solver.bindings[0].bodies[1]=usize::MAX;let before=snapshot(&bad);assert!(bad.advance(1./60.).is_err());assert_eq!(snapshot(&bad),before,"late joint failure leaked candidate physics/contact state");
  let mut bad=world.clone();bad.clock.queue.insert(99,0.001).unwrap();let before=snapshot(&bad);assert!(bad.advance(1./60.).is_err());assert_eq!(snapshot(&bad),before,"unported event dispatch leaked candidate physics/contact state");
- let mut bad=world.clone();let feature=crate::ivp_managed_response::Feature{endpoint:crate::ivp_create::Endpoint{object:1,feature:crate::ivp_create::Feature{kind:3,edge:0,opposite:0,triangle:0,ledge:0,vertex:0,vertices:[Vec3::ZERO;3]}},vertices:[Vec3::ZERO;3],canonical:[Vec3::ZERO;3]};let before=snapshot(&bad);assert!(bad.resolve(0xc0000,[feature.clone(),feature],Some(0)).is_err());assert_eq!(snapshot(&bad),before,"invalid admission leaked refreshed cache context");
+ let mut bad=world.clone();let feature=crate::ivp_managed_response::Feature{material_code:0,endpoint:crate::ivp_create::Endpoint{object:1,feature:crate::ivp_create::Feature{kind:3,edge:0,opposite:0,triangle:0,ledge:0,vertex:0,vertices:[Vec3::ZERO;3]}},vertices:[Vec3::ZERO;3],canonical:[Vec3::ZERO;3]};let before=snapshot(&bad);assert!(bad.resolve(0xc0000,[feature.clone(),feature],Some(0)).is_err());assert_eq!(snapshot(&bad),before,"invalid admission leaked refreshed cache context");
 
 }
 

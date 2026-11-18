@@ -37,6 +37,10 @@ impl Managed{
         }
         let out=Admission{key:result.key,created:result.created,system,initial:result.initial};*self=next;Ok(out)
     }
+    pub(crate) fn object_contacts(&self,object:u64)->Result<Vec<u64>,&'static str>{Ok(self.lists.get(&object).ok_or("unknown contact object")?.iter().map(|c|c.key).collect())}
+    pub(crate) fn mark_material_system_dirty(&mut self,key:u64)->Result<(),&'static str>{self.owner.mark_material_system_dirty(key as usize)}
+
+    pub(crate) fn reset_registered_unit_clocks(&mut self,core:usize)->Result<(),&'static str>{self.owner.reset_registered_unit_clocks(core)}
     pub(crate) fn remove(&mut self,key:u64)->Result<(),&'static str>{
         let endpoints=self.features.get(&key).ok_or("unknown managed feature contact")?.clone();let mut next=self.clone();
         next.owner.remove(usize::try_from(key).map_err(|_|"contact identity width overflow")?)?;
@@ -66,6 +70,8 @@ impl Managed{
         prepare:impl FnMut(&[usize],&mut crate::ivp_unit::UnitFlags)->Result<(),&'static str>)->Result<Option<crate::ivp_unit_registry::UnitDispatch>,&'static str>{self.owner.next_unit_dispatch(poll,prepare)}
     pub(crate) fn finish_unit_dispatch(&mut self,dispatch:crate::ivp_unit_registry::UnitDispatch,
         classify:impl FnMut(usize)->Result<u8,&'static str>)->Result<(),&'static str>{self.owner.finish_unit_dispatch(dispatch,classify)}
+    pub(crate) fn poll_unit_dispatch(&mut self,dispatch:crate::ivp_unit_registry::UnitDispatch,classify:impl FnMut(usize)->Result<u8,&'static str>)->Result<crate::ivp_unit_registry::PolledUnitDispatch,&'static str>{self.owner.poll_unit_dispatch(dispatch,classify)}
+    pub(crate) fn finish_polled_unit(&mut self,dispatch:crate::ivp_unit_registry::PolledUnitDispatch)->Result<(),&'static str>{self.owner.finish_polled_unit(dispatch)}
     pub(crate) fn apply_registered_impulses(&mut self,bodies:&mut[crate::ivp_joint_apply::Body],commands:&[crate::ivp_joint_tail::Command])->Result<(),&'static str>{self.owner.apply_registered_impulses(bodies,commands)}
     pub(crate) fn register_ordinary_object(&mut self,id:u64,core:usize,fixed:bool)->Result<(),&'static str>{
         if id==0||self.objects.contains_key(&id)||self.objects.values().any(|&c|c==core){return Err("invalid ordinary contact object identity");}

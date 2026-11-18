@@ -12,7 +12,7 @@ impl Scene{
   world.set_velocity(1,Some(Vec3::new(-3.,0.,0.)),Some(Vec3::new(0.,10.,5.)))?;
   world.set_velocity(2,Some(Vec3::new(2.,0.,0.)),Some(Vec3::new(0.,20.,0.)))?;
   use crate::ivp_create::{Endpoint,Feature as Compact};use crate::ivp_managed_response::Feature;
-  let features=std::array::from_fn(|i|Feature{endpoint:Endpoint{object:i as u64+1,feature:Compact{kind:3,edge:0,opposite:0,triangle:0,ledge:0,vertex:0,vertices:[Vec3::ZERO;3]}},vertices:[Vec3::ZERO;3],canonical:[Vec3::ZERO;3]});world.resolve(0xc0000,features,Some(1))?;
+  let features=std::array::from_fn(|i|Feature{material_code:0,endpoint:Endpoint{object:i as u64+1,feature:Compact{kind:3,edge:0,opposite:0,triangle:0,ledge:0,vertex:0,vertices:[Vec3::ZERO;3]}},vertices:[Vec3::ZERO;3],canonical:[Vec3::ZERO;3]});world.resolve(0xc0000,features,Some(1))?;
   let mut frames=[[[0.;4];3];2];for frame in &mut frames{for (i,row) in frame.iter_mut().enumerate(){row[i]=1.;}}frames[0][0][3]=-16.;frames[1][0][3]=16.;
   let p=crate::ivp_ragdoll_constructor::Parameters{frames,axes:[crate::ivp_ragdoll_constructor::Limit{min:-20.,max:20.,velocity:0.,torque:0.};3],force_limit:0.,torque_limit:0.,mass_scale:[1.;2],angular_only:false,clockwise:true};
   let offsets=world.object_offsets().clone();let constraints=(0..2).map(|i|world.ragdoll_definition(i,[i+1,i],p,&offsets)).collect::<Result<Vec<_>,_>>()?;

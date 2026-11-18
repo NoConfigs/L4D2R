@@ -33,6 +33,13 @@ impl Contacts {
     pub(crate) fn system_slots(&self)->usize{self.next_system}
     pub(crate) fn system_cores(&self,id:usize)->Result<&[usize],&'static str>{Ok(&self.systems.get(&id).ok_or("unknown contact system")?.cores)}
     pub(crate) fn system_dirty(&self,id:usize)->Result<bool,&'static str>{Ok(self.systems.get(&id).ok_or("unknown contact system")?.dirty)}
+    ///100f1680 marks each system touching a changed fixed object's contacts
+    /// before waking/rechecking its dynamic neighbours. Repair remains at PSI.
+    pub(crate) fn mark_material_system_dirty(&mut self,contact:usize)->Result<(),&'static str>{
+        let system=self.binding(contact)?.system;
+        self.systems.get_mut(&system).ok_or("material contact lost its system")?.dirty=true;Ok(())
+    }
+
     pub(crate) fn reorder(&mut self,id:usize,order:&[usize])->Result<(),&'static str>{
         let s=self.systems.get_mut(&id).ok_or("unknown contact system")?;
         if !unique(order)||order.len()!=s.contacts.len()||order.iter().copied().collect::<BTreeSet<_>>()!=s.contacts.iter().copied().collect(){return Err("normal order changes contact membership");}
@@ -220,6 +227,8 @@ impl Contacts {
         prepare:impl FnMut(&[usize],&mut crate::ivp_unit::UnitFlags)->Result<(),&'static str>)->Result<Option<crate::ivp_unit_registry::UnitDispatch>,&'static str>{self.registry.next_unit_dispatch(poll,prepare)}
     pub(crate) fn finish_unit_dispatch(&mut self,dispatch:crate::ivp_unit_registry::UnitDispatch,
         classify:impl FnMut(usize)->Result<u8,&'static str>)->Result<(),&'static str>{self.registry.finish_unit_dispatch(dispatch,classify)}
+    pub(crate) fn poll_unit_dispatch(&mut self,dispatch:crate::ivp_unit_registry::UnitDispatch,classify:impl FnMut(usize)->Result<u8,&'static str>)->Result<crate::ivp_unit_registry::PolledUnitDispatch,&'static str>{self.registry.poll_unit_dispatch(dispatch,classify)}
+    pub(crate) fn finish_polled_unit(&mut self,dispatch:crate::ivp_unit_registry::PolledUnitDispatch)->Result<(),&'static str>{self.registry.finish_polled_unit(dispatch)}
     // These operations use the registry already owned by the contact graph.
     pub(crate) fn apply_registered_impulses(&mut self,bodies:&mut[crate::ivp_joint_apply::Body],commands:&[crate::ivp_joint_tail::Command])->Result<(),&'static str>{
         let bindings=bodies.iter().map(|b|crate::ivp_impulse_wake::Binding{body:b.id,current:b.id,real:b.id}).collect::<Vec<_>>();
@@ -238,6 +247,7 @@ impl Contacts {
     pub(crate) fn detach_registered_group(&mut self,id:usize)->Result<(),&'static str>{
         let mut next=self.clone();next.registry.unregister_group(id,true)?;next.check()?;*self=next;Ok(())
     }
+    pub(crate) fn reset_registered_unit_clocks(&mut self,core:usize)->Result<(),&'static str>{let cores=self.registry.unit_cores(core)?.to_vec();for id in cores.into_iter().rev(){self.registry.reset_core_clock(id)?;}Ok(())}
     pub(crate) fn wake_registered_core(&mut self,id:usize)->Result<(),&'static str>{self.registry.wake(id)}
     pub(crate) fn wake_registered_core_now(&mut self,id:usize)->Result<(),&'static str>{self.registry.wake_core_now(id)}
     pub(crate) fn finish_registered_wake(&mut self,id:usize)->Result<(),&'static str>{self.registry.finish_wake_unit(id)}

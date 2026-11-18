@@ -18,6 +18,9 @@ pub(crate) struct Owner{
 #[derive(Debug,PartialEq)]
 pub(crate) enum Event{Impact(usize),Deferred,Retry}
 pub(crate) struct Active{pub objects:[usize;2],pub flags:u32,pub frame:u32,pub geometry:far::Geometry,pub handle:Option<u16>,pub scheduled:Option<(f64,f32)>}
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub(crate) enum Phase{Inactive,Prediction,Predicted,Timed,Impact,Rebuilt}
+pub(crate) struct Observation<'a>{pub phase:Phase,pub clock:Clock,pub objects:Option<[usize;2]>,pub flags:u32,pub bodies:&'a[Body]}
 struct Context<'a>{cache:&'a mut WorldCache,graph:&'a mut crate::ivp_mindist_graph::Graph,pairs:&'a mut BTreeMap<usize,Pair>,
     radii:&'a[f32],ranks:&'a[u32],bodies:&'a[Body],counter:&'a mut u32,queue:&'a mut Queue,clock:Clock,deadline:f64,dt:f32,config:schedule::Config}
 impl Owner{
@@ -41,13 +44,15 @@ impl Owner{
         for b in bodies{let core=cache.register_core(b.prediction);cache.register_object(core,b.object_flags,ObjectFrame{shift:None,rotation:None})?;}
         Ok(Self{bounds,cache,graph:crate::ivp_mindist_graph::Graph::new(bodies.len()),pairs:BTreeMap::new(),radii,ranks,flags:bodies.iter().map(|b|b.object_flags).collect(),counter:0,dt,revision:0,core_revisions:vec![0;bodies.len()],config})
     }
-    pub(crate) fn predict(&mut self,bodies:&[Body],order:&[usize],notifications:&[usize],clock:Clock,deadline:f64,queue:&mut Queue)->Result<(),&'static str>{
-        if bodies.len()!=self.radii.len(){return Err("sphere owner body count changed without registration");}
-        for b in bodies{self.cache.update_core(b.id,b.prediction)?;self.cache.set_flags(b.id,b.object_flags)?;}
+    fn notify_objects(&mut self,bodies:&[Body],notifications:&[usize],clock:Clock,deadline:f64,queue:&mut Queue)->Result<(),&'static str>{
         let mut context=Context{cache:&mut self.cache,graph:&mut self.graph,pairs:&mut self.pairs,radii:&self.radii,ranks:&self.ranks,bodies,counter:&mut self.counter,queue,clock,deadline,dt:self.dt,config:self.config};
         for &id in notifications{
             let b=bodies.get(id).ok_or("unknown bounds notification core")?;
             if self.flags[b.id]!=b.object_flags{
+                let before=self.flags[b.id];let after=b.object_flags;
+                if before&!255==after&!255&&(1..=3).contains(&(before&255))&&(1..=3).contains(&(after&255)){
+                    self.bounds.set_flags(b.id,after);self.flags[b.id]=after;continue;
+                }
                 if b.object_flags&0xff==8{
                     self.bounds.sleep_with_flags_and_hooks(b.id,clock.time,self.dt,b.current.position.to_array(),b.object_flags,&mut context)?;
                     context.cache.detach(b.id)?;
@@ -55,7 +60,14 @@ impl Owner{
                 self.flags[b.id]=b.object_flags;
             }
         }
+        Ok(())
+    }
+    pub(crate) fn predict(&mut self,bodies:&[Body],order:&[usize],notifications:&[usize],clock:Clock,deadline:f64,queue:&mut Queue)->Result<(),&'static str>{
+        if bodies.len()!=self.radii.len(){return Err("sphere owner body count changed without registration");}
+        for b in bodies{self.cache.update_core(b.id,b.prediction)?;self.cache.set_flags(b.id,b.object_flags)?;}
+        self.notify_objects(bodies,notifications,clock,deadline,queue)?;
         if bodies.iter().any(|b|self.flags[b.id]!=b.object_flags){return Err("object flag transition lacks a registry notification");}
+        let mut context=Context{cache:&mut self.cache,graph:&mut self.graph,pairs:&mut self.pairs,radii:&self.radii,ranks:&self.ranks,bodies,counter:&mut self.counter,queue,clock,deadline,dt:self.dt,config:self.config};
         let predictions=order.iter().map(|&object|bounds::Prediction{object,center:bodies[object].prediction.sample(clock.time,ObjectFrame{shift:None,rotation:None}).position.to_array(),linear:crate::ivp_bounds::speed(context.velocity(object)),angular:0.}).collect::<Vec<_>>();
         let prepared=self.bounds.prepare_predictions(clock.time,self.dt,&predictions)?;
         self.bounds.dispatch_predictions(prepared,&mut context)?;
@@ -66,27 +78,66 @@ impl Owner{
         }
         Ok(())
     }
+    ///100eb7d0/100e8cd0: visit completed-unit cores backwards and refresh
+    /// their inactive object heads before graph repair. This phase relinks valid
+    /// geometry without scheduling; ordinary sphere queries always return1.
+    fn refresh_inactive_unit(&mut self,bodies:&[Body],members:&[usize],clock:Clock,deadline:f64,queue:&mut Queue)->Result<usize,&'static str>{
+        if bodies.len()!=self.radii.len(){return Err("sphere inactive body membership changed");}
+        let mut count=0;
+        for &object in members.iter().rev(){
+            let links=self.graph.inactive_object_links(object)?.to_vec();
+            for link in links{
+                if !self.graph.inactive_object_links(object)?.contains(&link){return Err("sphere inactive notification lost saved object link");}
+                let objects=self.graph.objects(link.pair)?;
+                for id in objects{self.cache.update_core(id,bodies[id].prediction)?;self.cache.set_flags(id,bodies[id].object_flags)?;}
+                let mut context=Context{cache:&mut self.cache,graph:&mut self.graph,pairs:&mut self.pairs,radii:&self.radii,ranks:&self.ranks,bodies,counter:&mut self.counter,queue,clock,deadline,dt:self.dt,config:self.config};
+                context.refresh(link.pair)?;
+                if context.graph.flags(link.pair)?&0xc000!=0x4000{context.graph.reactivate(link.pair,[false;2])?;}
+                count+=1;
+            }
+        }
+        Ok(count)
+    }
     /// Advance physical state and discovery as one transaction. The actual PSI
     /// dispatcher supplies clock generation and queue ownership; no public-exit
     /// phase reconstruction or copied persistent physical bank is involved.
     /// Unsupported hold/wake/anomaly branches still roll back both owners.
-    pub(crate) fn advance(&mut self,physical:&mut crate::ivp_registered_contacts::ContactWorld,delta:f32)->Result<(),&'static str>{
-        let next=std::cell::RefCell::new(self.clone());
-        physical.advance_with_cache_context(delta,|bodies,ids,clock|next.borrow_mut().prepare_contact_cache(bodies,ids,clock),|bodies,order,notices,clock,deadline,queue|next.borrow_mut().predict(bodies,order,notices,clock,deadline,queue),
-            |context,id,clock,deadline,queue|{
-                let mut owner=next.borrow_mut();match owner.event(id,context.bodies()?,clock,deadline,queue)?{
-                    Event::Impact(pair)=>{owner.wake_impact_endpoints(pair,context,clock,deadline,queue)?;let admitted=owner.admit(pair,context,clock)?;
-                        if context.has_impact_elasticities(admitted.key)?{context.primary_impact(admitted.key)?;
-                            let mut wave=crate::ivp_impact_wave::Wave::new_cached(context,admitted,&mut owner.cache,clock)?;while wave.step_cached(context,&mut owner.cache,clock)?.is_some(){wave.continue_iteration()?;}
-                            let changed=wave.rebuild(context)?;
-                            owner.rebuild_bounds(context.bodies()?,&changed,clock,deadline,queue)?;
-                            owner.recheck_impact_pairs(context.bodies()?,&changed,clock,deadline,queue)
-                        }
-                        else{Err("contact-world immediate impact response is not connected")}
-                    },Event::Deferred|Event::Retry=>Ok(())
-                }
-            })?;
-        *self=next.into_inner();Ok(())
+    pub(crate) fn advance(&mut self,physical:&mut crate::ivp_registered_contacts::ContactWorld,delta:f32)->Result<(),&'static str>{self.advance_observed(physical,delta,|_|Ok(()))}
+    pub(crate) fn assign_material(&mut self,physical:&mut crate::ivp_registered_contacts::ContactWorld,object:u64,index:i32)->Result<(),&'static str>{
+        let mut next=self.clone();let mut world=physical.clone();if !world.prepare_material_assignment(object,index)?{return Ok(());}let core=world.object_binding(object)?.0;
+        world.with_candidate_context(|context,clock,deadline,queue|next.wake_cores_observed([core],context,clock,deadline,queue,true,|_,_|Ok(())))?;
+        world.refresh_material_assignment_cached(object,&mut next.cache)?;*self=next;*physical=world;Ok(())
+    }
+    pub(crate) fn wake_initial(&mut self,physical:&mut crate::ivp_registered_contacts::ContactWorld,core:usize,whole:bool)->Result<(),&'static str>{
+        let mut next=self.clone();physical.with_candidate_context(|context,clock,deadline,queue|next.wake_cores_observed([core],context,clock,deadline,queue,whole,|_,_|Ok(())))?;*self=next;Ok(())
+    }
+    pub(crate) fn advance_observed(&mut self,physical:&mut crate::ivp_registered_contacts::ContactWorld,delta:f32,mut observe:impl FnMut(Observation<'_>)->Result<(),&'static str>)->Result<(),&'static str>{
+        let next=std::cell::RefCell::new(self.clone());let observe=std::cell::RefCell::new(&mut observe);
+        physical.advance_with_lifecycle_context(delta,|bodies,ids,clock|next.borrow_mut().prepare_contact_cache(bodies,ids,clock),|context,clock,deadline,queue|{
+            let queued=context.pending_cores().into_iter().rev().collect::<Vec<_>>();next.borrow_mut().wake_cores_observed(queued,context,clock,deadline,queue,true,|_,_|Ok(()))?;
+            let notices=context.take_object_notifications();next.borrow_mut().notify_objects(context.bodies()?,&notices,clock,deadline,queue)
+        },|context,members,clock,deadline,queue|{
+            next.borrow_mut().refresh_inactive_unit(context.bodies()?,members,clock,deadline,queue)?;
+            observe.borrow_mut()(Observation{phase:Phase::Inactive,clock,objects:None,flags:0,bodies:context.bodies()?})
+        },|context,order,notices,clock,deadline,queue|{
+            observe.borrow_mut()(Observation{phase:Phase::Prediction,clock,objects:None,flags:0,bodies:context.bodies()?})?;
+            next.borrow_mut().predict(context.bodies()?,order,notices,clock,deadline,queue)?;
+            observe.borrow_mut()(Observation{phase:Phase::Predicted,clock,objects:None,flags:0,bodies:context.bodies()?})
+        },|context,id,clock,deadline,queue|{
+            let mut owner=next.borrow_mut();let pair=id.wrapping_sub(PAIR_BASE);let objects=owner.pairs.get(&pair).ok_or("unknown observed sphere event")?.objects;
+            observe.borrow_mut()(Observation{phase:Phase::Timed,clock,objects:Some(objects),flags:owner.graph.flags(pair)?,bodies:context.bodies()?})?;
+            match owner.event(id,context.bodies()?,clock,deadline,queue)?{
+                Event::Impact(pair)=>{
+                    observe.borrow_mut()(Observation{phase:Phase::Impact,clock,objects:Some(objects),flags:owner.graph.flags(pair)?,bodies:context.bodies()?})?;
+                    owner.wake_impact_endpoints(pair,context,clock,deadline,queue)?;let admitted=owner.admit(pair,context,clock)?;
+                    if !context.has_impact_elasticities(admitted.key)?{return Err("contact-world immediate impact response is not connected");}
+                    context.primary_impact(admitted.key)?;let mut wave=crate::ivp_impact_wave::Wave::new_cached(context,admitted,&mut owner.cache,clock)?;
+                    while wave.step_cached(context,&mut owner.cache,clock)?.is_some(){wave.continue_iteration()?;}
+                    let changed=wave.rebuild(context)?;owner.rebuild_bounds(context.bodies()?,&changed,clock,deadline,queue)?;owner.recheck_impact_pairs(context.bodies()?,&changed,clock,deadline,queue)?;
+                    observe.borrow_mut()(Observation{phase:Phase::Rebuilt,clock,objects:Some(objects),flags:owner.graph.flags(pair).unwrap_or(0),bodies:context.bodies()?})
+                },Event::Deferred|Event::Retry=>Ok(())
+            }
+        })?;*self=next.into_inner();Ok(())
     }
     ///1010bc90 rechecks geometry before invoking an impact or retrying. The
     /// dispatcher has already removed the queued entry. Impact response itself
@@ -121,11 +172,15 @@ impl Owner{
     pub(crate) fn wake_impact_endpoints(&mut self,id:usize,physical:&mut crate::ivp_registered_contacts::CollisionContext<'_>,clock:Clock,deadline:f64,queue:&mut Queue)->Result<(),&'static str>{
         self.wake_impact_endpoints_observed(id,physical,clock,deadline,queue,|_,_|Ok(()))
     }
-    fn wake_impact_endpoints_observed(&mut self,id:usize,physical:&mut crate::ivp_registered_contacts::CollisionContext<'_>,clock:Clock,deadline:f64,queue:&mut Queue,mut observe:impl FnMut(&Self,&crate::ivp_registered_contacts::CollisionContext<'_>)->Result<(),&'static str>)->Result<(),&'static str>{
+    fn wake_impact_endpoints_observed(&mut self,id:usize,physical:&mut crate::ivp_registered_contacts::CollisionContext<'_>,clock:Clock,deadline:f64,queue:&mut Queue,observe:impl FnMut(&Self,&crate::ivp_registered_contacts::CollisionContext<'_>)->Result<(),&'static str>)->Result<(),&'static str>{
         let objects=self.pairs.get(&id).ok_or("unknown waking impact pair")?.objects;
+        self.wake_cores_observed(objects,physical,clock,deadline,queue,true,observe)
+    }
+    fn wake_cores_observed(&mut self,objects:impl IntoIterator<Item=usize>,physical:&mut crate::ivp_registered_contacts::CollisionContext<'_>,clock:Clock,deadline:f64,queue:&mut Queue,whole:bool,mut observe:impl FnMut(&Self,&crate::ivp_registered_contacts::CollisionContext<'_>)->Result<(),&'static str>)->Result<(),&'static str>{
         for core in objects{
             if physical.bodies()?[core].object_flags&255!=8{continue;}
-            while let Some(object)=physical.dormant_unit_members(core)?.first().copied(){
+            let mut initial=true;
+            while let Some(object)=if whole{physical.dormant_unit_members(core)?.first().copied()}else if initial{initial=false;Some(core)}else{None}{
                 let activated=physical.wake_impact_core(object)?;if activated!=[object]{return Err("member wake produced unrelated notifications");}
                 let saved={let b=&mut physical.bodies_mut()?[object];let saved=(b.flags,b.object_flags);b.flags=(b.flags&0xff)|0x2100;b.object_flags=(b.object_flags&!0xff)|0x21;saved};
                 let result={let bodies=physical.bodies()?;let b=bodies[object];
@@ -150,7 +205,7 @@ impl Owner{
                 //new contacts: its retained unit may now contain dormant cores.
                 observe(self,physical)?;
             }
-            physical.finish_impact_wake(core)?;
+            if whole{physical.finish_impact_wake(core)?;}
         }Ok(())
     }
     ///10104320 prepares all changed cores' remaining-tick budgets before the
@@ -515,6 +570,89 @@ impl bounds::Hooks for Context<'_>{
     fn native_gravity_stacks_rest_on_fixed_sphere_contacts(){
         let data:serde_json::Value=serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(concat!(env!("CARGO_MANIFEST_DIR"),"/tools/fixtures/native-ivp-impact-gravity-stack.json")).unwrap())).unwrap();
         assert_multibody_cases(&data,None);
+    }
+    #[test]
+    fn native_sphere_inactive_notifications_reactivate_without_scheduling(){
+        use serde_json::{Value,json};
+        use crate::ivp_joint_apply::tests::{body,snapshot};
+        let data:Value=serde_json::from_str(include_str!("../tools/fixtures/native-ivp-sphere-inactive.json")).unwrap();
+        let packet=|owner:&Owner,id:usize|{let p=&owner.pairs[&id];let g=p.geometry;let (slots,objects,_)=owner.cache.metadata();
+            json!({"flags":owner.graph.flags(id).unwrap(),"frame":p.frame,"geometry":[g.projection.to_bits(),g.linear_delta.to_bits(),g.distance.to_bits(),g.normal.x.to_bits(),g.normal.y.to_bits(),g.normal.z.to_bits()],"active":owner.graph.active().contains(&id),"inactive":owner.graph.inactive().contains(&id),"handle":p.handle.unwrap_or(u16::MAX),"object_active":p.objects.map(|o|owner.graph.object_links(o).unwrap().iter().any(|s|s.pair==id)),"object_inactive":p.objects.map(|o|owner.graph.inactive_object_links(o).unwrap().iter().any(|s|s.pair==id)),"refs":p.objects.map(|o|slots[objects[o].cache.unwrap()].references)})};
+        let mut count=0;
+        for c in data["cases"].as_array().unwrap(){
+            let f=|v:&Value|f32::from_bits(v.as_u64().unwrap() as u32);let dt=f(&c["dt"]);
+            let initial=[body(&c["initial"][0]),body(&c["initial"][1])];let mut owner=Owner::new(&initial,vec![f(&c["margin"])*0.5;2],&[0,1],dt).unwrap();
+            let clock=Clock{time:f64::from_bits(c["initial_clock"].as_u64().unwrap()),frame:c["initial_frame"].as_u64().unwrap() as u32};let mut queue=Queue::new(8,0.).unwrap();
+            let id=owner.graph.register([0,1]).unwrap();owner.graph.activate(id,[false;2]).unwrap();owner.pairs.insert(id,Pair{broad:usize::MAX,objects:[0,1],geometry:far::Geometry{projection:0.,linear_delta:0.,distance:0.,normal:Vec3::ZERO},frame:0,far:false,handle:None});
+            {let mut context=Context{cache:&mut owner.cache,graph:&mut owner.graph,pairs:&mut owner.pairs,radii:&owner.radii,ranks:&owner.ranks,bodies:&initial,counter:&mut owner.counter,queue:&mut queue,clock,deadline:clock.time+dt as f64,dt,config:owner.config};context.refresh(id).unwrap();}
+            assert_eq!(packet(&owner,id),c["initial_packet"],"case{} initial",c["id"]);
+            owner.graph.make_inactive(id).unwrap();assert_eq!(packet(&owner,id),c["before_packet"],"case{} inactive",c["id"]);
+            // These are borrowed phase inputs, not recorded outcomes used to drive
+            // an end-to-end simulation. Full-world controls remain separate.
+            let bodies=[body(&c["before"][0]),body(&c["before"][1])];let before=bodies.map(snapshot);
+            let clock=Clock{time:f64::from_bits(c["clock"].as_u64().unwrap()),frame:c["frame"].as_u64().unwrap() as u32};
+            assert_eq!(owner.refresh_inactive_unit(&bodies,&[0,1],clock,clock.time+dt as f64,&mut queue).unwrap(),1);
+            assert_eq!(packet(&owner,id),c["after_packet"],"case{} refreshed",c["id"]);
+            assert!(queue.scheduled(PAIR_BASE+id).is_none());assert_eq!(json!(bodies.map(snapshot)),c["after"]);assert_eq!(bodies.map(snapshot),before);
+            let owner_before=metadata(&owner);assert_eq!(owner.refresh_inactive_unit(&bodies,&[1,0],clock,clock.time+dt as f64,&mut queue).unwrap(),0);
+            assert_eq!(metadata(&owner),owner_before);assert_eq!(packet(&owner,id),c["repeat_packet"]);count+=1;
+        }
+        assert_eq!(count,192);
+    }
+    #[test]
+    fn native_sphere_material_assignments_preserve_public_wake_and_contact_sequences(){
+        use serde_json::{Value,json};
+        let data:Value=serde_json::from_str(include_str!("../tools/fixtures/native-ivp-sphere-material-assign.json")).unwrap();
+        let systems:Value=serde_json::from_str(include_str!("../tools/fixtures/native-ivp-sphere-material-systems.json")).unwrap();
+        let system_bank=|w:&crate::ivp_registered_contacts::ContactWorld|json!((1..=3).map(|object|w.contacts().material_system_snapshot(object)).collect::<Vec<_>>());
+        let f=|v:&Value|f32::from_bits(v.as_u64().unwrap() as u32);let vec=|v:&Value|Vec3::from_array(std::array::from_fn(|i|f(&v[i])));
+        let bank=|v:&Value|json!(v.as_array().unwrap().iter().enumerate().map(|(i,p)|{let mut a=p[0].clone();let mut b=p[1].clone();a["id"]=json!(i);b["id"]=json!(i);assert_eq!(a,b);a}).collect::<Vec<_>>());
+        let physical_bank=|w:&crate::ivp_registered_contacts::ContactWorld|json!(w.bodies().iter().copied().map(crate::ivp_joint_apply::tests::snapshot).collect::<Vec<_>>());
+        let mut impacts=0;
+        for c in data["cases"].as_array().unwrap(){
+            let id=c["id"].as_u64().unwrap();let dt=f(&c["dt"]);let unit=f32::from_bits(0x3cd013a9);let g=vec(&c["gravity_input"]);let gravity=Vec3::new(g.x*unit,-g.z*unit,g.y*unit);
+            let mut world=crate::ivp_registered_contacts::ContactWorld::empty_native(dt,123,gravity,Vec3::ZERO).unwrap();let prefix=f(&c["prefix"]);if prefix>0.{world.advance(prefix).unwrap();}
+            let mut registry=crate::ivp_surface_registry::Registry::default();
+            for (i,text) in data["material_texts"].as_array().unwrap().iter().enumerate(){let text=text.as_str().unwrap();let bytes=(0..text.len()).step_by(2).map(|i|u8::from_str_radix(&text[i..i+2],16).unwrap()).collect::<Vec<_>>();registry.parse_file(&format!("sphere-material-{i}"),std::str::from_utf8(&bytes).unwrap()).unwrap();}
+            let shared=crate::ivp_material_backend::SharedSurfaceRegistry::new(registry);let table=crate::ivp_material_backend::WorldMaterialTable::default();let input=data["material_table"].as_array().unwrap().iter().map(|v|v.as_i64().unwrap() as i32).collect::<Vec<_>>();table.set(&input,128).unwrap();world.bind_shared_materials(&shared,&table).unwrap();
+            let radius=f(&data["sphere_radius"]);
+            for actor in 0..3{world.create_sphere(actor as u64+1,crate::ivp_sphere_constructor::Parameters{radius,position:vec(&c["positions"][actor]).to_array(),angles:[0.;3],mass:5.+5.*actor as f32,inertia_scale:1.,damping:0.,angular_damping:0.,rotational_limit:0.1,fixed:actor==2,collisions:true},0.8).unwrap();world.set_object_material(actor as u64+1,1).unwrap();world.configure_sphere_elasticity(actor,0.2).unwrap();let command=&c["velocity_inputs"][actor];let linear=(!command["linear"].is_null()).then(||vec(&command["linear"]));let angular=(!command["angular"].is_null()).then(||vec(&command["angular"]));if linear.is_some()||angular.is_some(){world.set_velocity(actor,linear,angular).unwrap();}}
+            let mut config=schedule::Config::bare_native();config.set_force_gravity(gravity).unwrap();let mut owner=Owner::new_with_config(world.bodies(),vec![radius*unit;3],&[0,1,2],dt,config).unwrap();
+            assert_eq!(physical_bank(&world),bank(&c["before"]),"sphere{id} constructed");
+            owner.wake_initial(&mut world,c["start"].as_u64().unwrap() as usize,c["whole"].as_bool().unwrap()).unwrap();assert_eq!(physical_bank(&world),bank(&c["after"]),"sphere{id} initial wake");
+            for actor in 0..3{assert_eq!(json!(world.registry().unit_cores(actor).unwrap()),c["units_after"][actor]["members"],"sphere{id} initial unit{actor}");assert_eq!(json!(world.registry().unit_flags(actor).unwrap().flags&255),c["units_after"][actor]["state"]);}
+            let mut trace=vec![];let mut budget_steps=vec![];
+            for iteration in 0..c["prediction_steps"].as_u64().unwrap(){
+                for update in c["material_assignments"].as_array().unwrap().iter().filter(|u|u["iteration"].as_u64()==Some(iteration)){
+                    assert_eq!(physical_bank(&world),bank(&update["before"]),"sphere{id} iteration{iteration} before material");
+                    let expected_systems=systems["cases"][id as usize]["updates"].as_array().unwrap().iter().find(|u|u["iteration"].as_u64()==Some(iteration)).unwrap();
+                    assert_eq!(system_bank(&world),expected_systems["before_systems"],"sphere{id} iteration{iteration} before systems");
+                    let before_world=crate::ivp_registered_contacts::snapshot(&world);let before_owner=metadata(&owner);
+                    owner.assign_material(&mut world,update["actor"].as_u64().unwrap()+1,update["index"].as_i64().unwrap() as i32).unwrap();
+                    assert_eq!(physical_bank(&world),bank(&update["after"]),"sphere{id} iteration{iteration} after material");
+                    assert_eq!(system_bank(&world),expected_systems["after_systems"],"sphere{id} iteration{iteration} after systems");
+                    if iteration==16{assert_eq!(crate::ivp_registered_contacts::snapshot(&world),before_world,"sphere{id} same material physical no-op");assert_eq!(metadata(&owner),before_owner,"sphere{id} same material geometry/cache no-op");}
+
+                }
+                if id==12&&iteration==12{
+                    let before_world=crate::ivp_registered_contacts::snapshot(&world);let before_owner=metadata(&owner);let mut rejected=false;
+                    let result=owner.advance_observed(&mut world,f(&c["step"]),|e|{if e.phase==Phase::Predicted{rejected=true;Err("reject sphere post-material prediction")}else{Ok(())}});
+                    assert!(rejected);assert_eq!(result,Err("reject sphere post-material prediction"));
+                    assert_eq!(crate::ivp_registered_contacts::snapshot(&world),before_world);assert_eq!(metadata(&owner),before_owner);
+                }
+                owner.advance_observed(&mut world,f(&c["step"]),|e|{let kind=match e.phase{Phase::Prediction=>0,Phase::Timed=>1,Phase::Impact=>{impacts+=1;2},_=>return Ok(())};trace.push(json!({"kind":kind,"time":e.clock.time.to_bits(),"frame":e.clock.frame,"flags":e.flags&0x3fffffff,"objects":e.objects.unwrap_or([999;2])}));Ok(())}).unwrap_or_else(|e|panic!("sphere{id} iteration{iteration}: {e}"));
+                budget_steps.push(budgets(&owner));
+            }
+            if id==12{if let Some(path)=std::env::var_os("L4D2R_TRACE_SPHERE_BUDGETS"){std::fs::write(path,serde_json::to_vec(&budget_steps).unwrap()).unwrap();}}
+            let mut expected=c["events"].clone();for e in expected.as_array_mut().unwrap(){e["flags"]=json!(e["flags"].as_u64().unwrap()&0x3fffffff);}for (i,(a,b)) in trace.iter().zip(expected.as_array().unwrap()).enumerate(){assert_eq!(a,b,"sphere{id} callback{i}");}assert_eq!(trace.len(),expected.as_array().unwrap().len(),"sphere{id} callback length");
+            assert_eq!(system_bank(&world),systems["cases"][id as usize]["post_systems"],"sphere{id} final systems");
+            assert_eq!(physical_bank(&world),bank(&c["predicted_after"]),"sphere{id} final physical");assert_eq!(world.clock().now.to_bits(),c["prediction_now"].as_u64().unwrap());assert_eq!(world.clock().deadline.to_bits(),c["prediction_deadline"].as_u64().unwrap());assert_eq!(world.clock().clock_serial as u64,c["prediction_frame"].as_u64().unwrap());
+            for actor in 0..3{assert_eq!(json!(world.registry().unit_cores(actor).unwrap()),c["predicted_units"][actor]["members"]);assert_eq!(json!(world.registry().unit_flags(actor).unwrap().flags&255),c["predicted_units"][actor]["state"]);let b=owner.bounds.object_budget(actor).unwrap();let native=&c["post_motion"][actor];assert_eq!(json!(b.time.to_bits()),native["time"],"sphere{id} budget time{actor}");assert_eq!(json!(b.rates.map(f32::to_bits)),native["rates"],"sphere{id} rates{actor}");assert_eq!(json!(b.accumulated.map(f32::to_bits)),native["accumulated"],"sphere{id} accumulated{actor}");assert_eq!(json!(b.predicted.to_bits()),native["predicted"],"sphere{id} predicted{actor}");assert_eq!(json!(b.threshold.to_bits()),native["threshold"],"sphere{id} threshold{actor}");
+                let mut rows=vec![];for (&pair,p) in &owner.pairs{if !p.far{continue;}if let Some(side)=p.objects.iter().position(|&a|a==actor){let keys=owner.bounds.distance_keys(pair).unwrap();let g=p.geometry;rows.push(json!({"objects":p.objects,"flags":owner.graph.flags(pair).unwrap()&0x3fffffff,"frame":p.frame,"key":keys[side].to_bits(),"geometry":[g.projection.to_bits(),g.linear_delta.to_bits(),g.distance.to_bits(),g.normal.x.to_bits(),g.normal.y.to_bits(),g.normal.z.to_bits()]}));}}
+                rows.sort_by_key(|v|v["objects"].to_string());let mut expected=c["post_far"][actor].as_array().unwrap().clone();for e in &mut expected{e["flags"]=json!(e["flags"].as_u64().unwrap()&0x3fffffff);}expected.sort_by_key(|v|v["objects"].to_string());assert_eq!(rows,expected,"sphere{id} far{actor}");
+            }
+        }
+        assert_eq!(impacts,208);assert_eq!(data["cases"].as_array().unwrap().len(),96);
     }
     fn assert_multibody_cases(data:&serde_json::Value,caches:Option<&serde_json::Value>){
         for c in data["cases"].as_array().unwrap(){

@@ -15,6 +15,7 @@ pub(crate) enum ResetVisit{Controller(ControllerKey),Core(usize)}
 /// controller callbacks may edit canonical registrations between these calls.
 #[derive(Debug)]
 pub(crate) struct UnitDispatch{unit:usize,cores:Vec<usize>,poll:bool,controllers:Vec<(ControllerKey,Vec<usize>)>}
+pub(crate) struct PolledUnitDispatch(UnitDispatch);
 impl UnitDispatch{
     pub(crate) fn cores(&self)->&[usize]{&self.cores}
     pub(crate) fn controllers(&self)->&[(ControllerKey,Vec<usize>)]{&self.controllers}
@@ -310,7 +311,13 @@ impl Registry{
     /// now-current joint/contact graph. The caller rolls back physical state,
     /// registry and poll together if any callback or classification fails.
     pub(crate) fn finish_unit_dispatch(&mut self,dispatch:UnitDispatch,
-        mut classify:impl FnMut(usize)->Result<u8,&'static str>)->Result<(),&'static str>{
+        classify:impl FnMut(usize)->Result<u8,&'static str>)->Result<(),&'static str>{
+        let polled=self.poll_unit_dispatch(dispatch,classify)?;self.finish_polled_unit(polled)
+    }
+    ///100eb7d0 polls movement before inactive-object notifications, then
+    /// rebuilds the dirty graph. The token keeps these phases single-use.
+    pub(crate) fn poll_unit_dispatch(&mut self,dispatch:UnitDispatch,
+        mut classify:impl FnMut(usize)->Result<u8,&'static str>)->Result<PolledUnitDispatch,&'static str>{
         let id=dispatch.unit;
         let u=self.units.get(id).and_then(Option::as_ref).ok_or("dispatched unit no longer exists")?;
         if u.cores!=dispatch.cores{return Err("unit membership changed before dispatch tail");}
@@ -325,6 +332,11 @@ impl Registry{
                 self.unlink(id);self.unit_mut(id).flags.flags=(self.unit(id).flags.flags&!0xff)|8;self.dormant.insert(0,id);
             }
         }
+        Ok(PolledUnitDispatch(dispatch))
+    }
+    pub(crate) fn finish_polled_unit(&mut self,polled:PolledUnitDispatch)->Result<(),&'static str>{
+        let dispatch=polled.0;let id=dispatch.unit;
+        if self.units.get(id).and_then(Option::as_ref).is_none_or(|u|u.cores!=dispatch.cores){return Err("unit membership changed during inactive notifications");}
         if self.unit(id).dirty{self.split(id);}self.check()
     }
     pub(crate) fn active_reset_visits(&self)->Vec<ResetVisit>{

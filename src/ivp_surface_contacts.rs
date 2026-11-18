@@ -13,6 +13,15 @@ pub(crate) mod pending;
 #[path="ivp_compact_discovery.rs"]
 pub(crate) mod discovery;
 pub(crate) type Counter=Arc<AtomicI32>;
+/// One map spans an owned forest, preserving aliases with independent values.
+/// Retaining source Arcs prevents pointer-key reuse during the snapshot.
+#[derive(Default)]
+pub(crate) struct CounterSnapshot{copies:std::collections::BTreeMap<usize,(Counter,Counter)>}
+impl CounterSnapshot{
+ pub(crate) fn counter(&mut self,source:&Counter)->Counter{
+  self.copies.entry(Arc::as_ptr(source) as usize).or_insert_with(||(source.clone(),Arc::new(AtomicI32::new(source.load(Ordering::Relaxed))))).1.clone()
+ }
+}
 pub(crate) struct Entry<'a>{pub key:Pair,pub contact:Contact,pub recursive:Option<Box<Recursive<'a>>>}
 pub(crate) struct Recursive<'a>{pub split:Option<usize>,pub count:Counter,pub descendants:Contacts<'a>}
 pub(crate) struct Contacts<'a>{objects:[usize;2],solids:[&'a PhySolid;2],entries:Vec<Entry<'a>>,listeners:Vec<Counter>}
@@ -20,6 +29,9 @@ pub(crate) struct Contacts<'a>{objects:[usize;2],solids:[&'a PhySolid;2],entries
 pub(crate) struct Input{pub bodies:[Body;2],pub at:f64,pub margin:f32,pub provided:[Option<usize>;2],pub restricted:[Option<usize>;2]}
 pub(crate) struct Changes{pub lists:[Vec<usize>;2],pub queries:[Option<Query>;2],pub created:Vec<Pair>,pub removed:Vec<Pair>}
 impl<'a> Contacts<'a>{
+ pub(crate) fn snapshot_with_counters(&self,counters:&mut CounterSnapshot)->Self{
+  Self{objects:self.objects,solids:self.solids,entries:self.entries.iter().map(|e|e.snapshot_with_counters(counters)).collect(),listeners:self.listeners.iter().map(|c|counters.counter(c)).collect()}
+ }
  pub(crate) fn try_clone_ordinary(&self)->Result<Self,&'static str>{
   if !self.listeners.is_empty()||self.entries.iter().any(|e|e.recursive.is_some()){return Err("recursive contact snapshots require independent counter ownership");}
   Ok(Self{objects:self.objects,solids:self.solids,entries:self.entries.iter().map(|e|Entry{key:e.key,contact:e.contact.clone(),recursive:None}).collect(),listeners:vec![]})
@@ -77,7 +89,11 @@ impl<'a> Contacts<'a>{
  }
 }
 
-impl Entry<'_>{
+impl<'a> Entry<'a>{
+ pub(crate) fn snapshot_with_counters(&self,counters:&mut CounterSnapshot)->Self{
+  let recursive=self.recursive.as_ref().map(|r|Box::new(Recursive{split:r.split,count:counters.counter(&r.count),descendants:r.descendants.snapshot_with_counters(counters)}));
+  Self{key:self.key,contact:self.contact.clone(),recursive}
+ }
  /// Transfer this query's current features, not a sphere proxy or the birth
  /// edge. Arena ledge keys must remain stable across repeated admissions.
  pub(crate) fn physical_features(&self,ledge_keys:[u32;2],convexes:[&Convex;2])->Result<[crate::ivp_managed_response::Feature;2],&'static str>{
@@ -347,6 +363,17 @@ mod pending_psi_tests;
 #[cfg(test)]
 mod snapshot_tests{
  use super::*;
+ #[test]
+ fn recursive_forest_snapshots_preserve_aliases_without_sharing_mutable_values(){
+  let solid=PhySolid::default();let root=Arc::new(AtomicI32::new(7));
+  let make=||{let own=Arc::new(AtomicI32::new(3));let mut descendants=Contacts::new([0,1],[&solid,&solid]).unwrap();descendants.listeners=vec![own.clone(),root.clone()];let mut tree=Contacts::new([0,1],[&solid,&solid]).unwrap();tree.entries.push(Entry{key:Pair{slots:[0,1],ledges:[0,0]},contact:Contact::new([0,1],crate::ivp_mindist_graph::COMPACT_PAIR_FLAGS,0.).unwrap(),recursive:Some(Box::new(Recursive{split:Some(1),count:own,descendants}))});tree};
+  let first=make();let second=make();let mut counters=CounterSnapshot::default();let a=first.snapshot_with_counters(&mut counters);let b=second.snapshot_with_counters(&mut counters);
+  let a=a.entries[0].recursive.as_ref().unwrap();let b=b.entries[0].recursive.as_ref().unwrap();let cloned_root=counters.counter(&root);
+  assert!(Arc::ptr_eq(&a.count,&a.descendants.listeners[0]));assert!(Arc::ptr_eq(&b.count,&b.descendants.listeners[0]));assert!(!Arc::ptr_eq(&a.count,&b.count));
+  assert!(Arc::ptr_eq(&a.descendants.listeners[1],&b.descendants.listeners[1]));assert!(Arc::ptr_eq(&cloned_root,&a.descendants.listeners[1]));assert!(!Arc::ptr_eq(&cloned_root,&root));
+  a.descendants.notify(2);assert_eq!(a.count.load(Ordering::Relaxed),5);assert_eq!(b.count.load(Ordering::Relaxed),3);assert_eq!(cloned_root.load(Ordering::Relaxed),9);
+  assert_eq!(root.load(Ordering::Relaxed),7);assert_eq!(first.entries[0].recursive.as_ref().unwrap().count.load(Ordering::Relaxed),3);assert_eq!(second.entries[0].recursive.as_ref().unwrap().count.load(Ordering::Relaxed),3);
+ }
  #[test]
  fn ordinary_staging_refuses_shared_recursive_counter_ownership(){
   let solid=PhySolid::default();let count=Arc::new(AtomicI32::new(7));

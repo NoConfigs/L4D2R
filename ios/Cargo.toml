@@ -39,6 +39,6 @@ debug = false
 # src/platform_impl/ios/view.rs): layoutSubviews sizes the window with the
 # view's contentScaleFactor, which the render resolution setting lowers.
 [patch.crates-io]
-# Shared game code uses the exposure readback extension in this vendored crate.
+# Shared code uses the vendored exposure readback API.
 bevy_post_process = { path = "../vendor/bevy_post_process" }
 winit = { path = "../vendor/winit" }

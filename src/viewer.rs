@@ -169,6 +169,40 @@ pub(crate) struct LightingTable {
     /// Shared dynamic variant per (base material, viewmodel).
     variants: HashMap<(AssetId<SourceMaterial>, bool), Handle<SourceMaterial>>,
 }
+/// A Source-lit material whose lighting comes from vertex colours (like
+/// static props): base x vertex light x exposure, with map fog.
+pub(crate) fn vertex_lit_material(base: StandardMaterial, table: &LightingTable) -> SourceMaterial {
+    SourceMaterial {
+        base,
+        extension: SourceLighting {
+            settings: Vec4::new(1., 0., 0., 0.),
+            ambient_cube: [Vec4::ZERO; 6],
+            sun_direction: Vec4::ZERO,
+            sun_color: Vec4::ZERO,
+            lightmap: None,
+            lightmap_params: Vec4::ZERO,
+            lighting_table: table.buffer.clone(),
+            emission: None,
+            emission_tint: Vec4::ZERO,
+            wound_rows: [Vec4::ZERO; 12],
+            wound: WoundUniform::default(),
+            wound_mask: None,
+            infected_base: None,
+            infected_palette: None,
+            infected_lookup: Vec4::ZERO,
+            infected_phong: InfectedPhongUniform::default(),
+            infected_detail: None,
+            infected_burn: None,
+            cap_phong: CapPhongUniform::default(),
+            glass_mask: None,
+            envmap: None,
+            envmap_tint: Vec4::ZERO,
+            envmap_params: Vec4::ZERO,
+            blend_texture: None,
+            blend_modulate: None,
+        },
+    }
+}
 impl FromWorld for LightingTable {
     fn from_world(world: &mut World) -> Self {
         let data = vec![Vec4::ZERO; LIGHT_SLOTS * LIGHT_SLOT_VEC4S];

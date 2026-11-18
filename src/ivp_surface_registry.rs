@@ -5,6 +5,7 @@ use std::collections::HashSet;
 pub(crate) struct Record {pub name:String,pub properties:[f32;5],pub words:[u32;26],pub name_symbol:u16}
 impl Record {fn new(name:String,name_symbol:u16,words:[u32;26])->Self{Self{name,name_symbol,properties:std::array::from_fn(|i|f32::from_bits(words[i])),words}}}
 pub(crate) const SOUND_KEYS:[&str;12]=["walkleft","walkright","runleft","runright","impactsoft","impacthard","scrapesmooth","scraperough","bulletimpact","rolling","break","strain"];
+#[derive(Clone)]
 pub(crate) struct Registry {pub records:Vec<Record>,pub shadow:usize,pub shadow_created:bool,pub files:HashSet<String>,pub symbols:Vec<String>}
 impl Default for Registry {
     fn default()->Self{let mut words=[0;26];words[0]=0.8f32.to_bits();words[1]=0.25f32.to_bits();words[2]=2000f32.to_bits();Self{records:vec![Record::new("default".into(),1,words)],shadow:0,shadow_created:false,files:HashSet::new(),symbols:vec![String::new(),"default".into()]}}

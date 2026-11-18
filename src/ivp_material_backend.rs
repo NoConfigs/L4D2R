@@ -3,6 +3,52 @@
 use std::sync::{Arc,RwLock};
 pub(crate) struct Backend {pub count:usize,pub shadow:i32}
 pub(crate) struct Manager {pub map:[u16;128]}
+#[derive(Clone,Copy,Debug)]
+pub(crate) struct ContactMaterial {pub key:u32,pub friction:f32,pub elasticity:f32}
+/// Ordinary surface records with either an authored remap snapshot or the
+/// native singleton's shared live remap. Ordinary PSI retains contact friction;
+/// native impact-cache rebuilds resolve it again against the current table.
+#[derive(Clone)]
+pub(crate) struct ContactMaterials {records:Vec<ContactMaterial>,map:[u16;128],shadow:i32,shared:Option<WorldMaterialTable>,registry:Option<SharedSurfaceRegistry>}
+impl ContactMaterials {
+    pub(crate) fn from_registry(registry:&crate::ivp_surface_registry::Registry,manager:&Manager)->Result<Self,&'static str>{
+        if registry.records.is_empty()||registry.shadow>=registry.records.len()||registry.records.len()>i32::MAX as usize{return Err("invalid ordinary contact material registry");}
+        let records=registry.records.iter().enumerate().map(|(key,r)|ContactMaterial{key:key as u32,friction:r.properties[0],elasticity:r.properties[1]}).collect::<Vec<_>>();
+        if records.iter().any(|r|!r.friction.is_finite()||!r.elasticity.is_finite()){return Err("nonfinite ordinary contact material");}
+        Ok(Self{records,map:manager.map,shadow:registry.shadow as i32,shared:None,registry:None})
+    }
+    /// Object defaults already carry a backend material index; the world
+    /// triangle remap must not be applied to this identity.
+    pub(crate) fn resolve_object(&self,index:i32)->Result<ContactMaterial,&'static str>{
+        if let Some(registry)=&self.registry{
+            let registry=registry.0.read().unwrap();let slot=Backend{count:registry.records.len(),shadow:registry.shadow as i32}.lookup(index).ok_or("invalid object material identity")?;let record=&registry.records[slot];
+            return Ok(ContactMaterial{key:slot as u32,friction:record.properties[0],elasticity:record.properties[1]});
+        }
+        let slot=Backend{count:self.records.len(),shadow:self.shadow}.lookup(index).ok_or("invalid object material identity")?;Ok(self.records[slot])
+    }
+    pub(crate) fn resolve(&self,code:u8)->Result<ContactMaterial,&'static str>{
+        if let Some(registry)=&self.registry{
+            let registry=registry.0.read().unwrap();let backend=Backend{count:registry.records.len(),shadow:registry.shadow as i32};
+            let selected=if let Some(table)=&self.shared{table.resolve(&backend,code as u32)?}else{Manager{map:self.map}.resolve(&backend,code as u32)?}.ok_or("ordinary feature material lacks fallback")?;
+            let record=&registry.records[selected];return Ok(ContactMaterial{key:selected as u32,friction:record.properties[0],elasticity:record.properties[1]});
+        }
+        let backend=Backend{count:self.records.len(),shadow:self.shadow};
+        let selected=if let Some(table)=&self.shared{table.resolve(&backend,code as u32)?}else{Manager{map:self.map}.resolve(&backend,code as u32)?};
+        let slot=selected.ok_or("ordinary feature material lacks fallback");
+        Ok(self.records[slot?])
+    }
+}
+/// Native surface records are shared by existing environment/material handles.
+/// Parsing a new filename updates future lookups; duplicate filenames are ignored.
+#[derive(Clone)]
+pub(crate) struct SharedSurfaceRegistry(Arc<RwLock<crate::ivp_surface_registry::Registry>>);
+impl SharedSurfaceRegistry{
+    pub(crate) fn new(registry:crate::ivp_surface_registry::Registry)->Self{Self(Arc::new(RwLock::new(registry)))}
+    pub(crate) fn parse_file(&self,file:&str,text:&str)->Result<(),&'static str>{self.0.write().unwrap().parse_file(file,text)}
+    pub(crate) fn contact_materials(&self,table:&WorldMaterialTable)->Result<ContactMaterials,&'static str>{
+        let mut binding=table.contact_materials(&self.0.read().unwrap())?;binding.registry=Some(self.clone());Ok(binding)
+    }
+}
 impl Backend {
     pub(crate) fn lookup(&self,index:i32)->Option<usize>{
         let index=if index>127 {if index==0xf000 {self.shadow}else{0}}else{index};
@@ -37,6 +83,12 @@ impl Default for WorldMaterialTable {
     fn default()->Self{Self(Arc::new(RwLock::new(Manager{map:std::array::from_fn(|i|i as u16)})))}
 }
 impl WorldMaterialTable {
+    /// Keep the same manager handle in every bound physics world/transaction.
+    /// Publishing a table changes future lookups without rewriting contacts.
+    pub(crate) fn contact_materials(&self,registry:&crate::ivp_surface_registry::Registry)->Result<ContactMaterials,&'static str>{
+        let mut binding=ContactMaterials::from_registry(registry,&self.0.read().unwrap())?;
+        binding.shared=Some(self.clone());Ok(binding)
+    }
     pub(crate) fn set(&self,input:&[i32],count:i32)->Result<(),&'static str>{self.0.write().unwrap().set_world_table(input,count)}
     pub(crate) fn resolve(&self,backend:&Backend,index:u32)->Result<Option<usize>,&'static str>{self.0.read().unwrap().resolve(backend,index)}
     /// Server101612b0 clears a128-entry array for each materialtable block,
@@ -78,6 +130,21 @@ pub(crate) fn parse_world_tables(text:&str,registry:&crate::ivp_surface_registry
 mod tests {
     use super::*;
     use serde_json::Value;
+    #[test]
+    fn live_binding_tracks_native_registry_growth_redefinition_and_shadow(){
+        let fixture:Value=serde_json::from_str(include_str!("../tools/fixtures/native-ivp-surface-registry.json")).unwrap();let mut checked=0;
+        for capture in fixture["captures"].as_array().unwrap(){
+            let shared=SharedSurfaceRegistry::new(crate::ivp_surface_registry::Registry::default());let table=WorldMaterialTable::default();let binding=shared.contact_materials(&table).unwrap();
+            for (file,state) in capture["files"].as_array().unwrap().iter().zip(capture["snapshots"].as_array().unwrap().iter().skip(1)){
+                shared.parse_file(file["file"].as_str().unwrap(),file["text"].as_str().unwrap()).unwrap();
+                let input=std::array::from_fn::<_,128,_>(|i|i as i32);table.set(&input,128).unwrap();
+                for code in 0..128u8{let slot=if (code as u64)<state["count"].as_u64().unwrap(){code as usize}else{0};let actual=binding.resolve(code).unwrap();let native=&state["records"][slot];assert_eq!(actual.key,slot as u32);
+                    assert_eq!(actual.friction.to_bits(),(native["properties"][0].as_f64().unwrap() as f32).to_bits());assert_eq!(actual.elasticity.to_bits(),(native["properties"][1].as_f64().unwrap() as f32).to_bits());checked+=1;
+                }
+                let mut input=input;input[127]=0xf000;table.set(&input,128).unwrap();let actual=binding.resolve(127).unwrap();let slot=state["shadow"].as_u64().unwrap() as usize;let native=&state["records"][slot];assert_eq!(actual.key,slot as u32);assert_eq!(actual.friction.to_bits(),(native["properties"][0].as_f64().unwrap() as f32).to_bits());assert_eq!(actual.elasticity.to_bits(),(native["properties"][1].as_f64().unwrap() as f32).to_bits());
+            }
+        }assert_eq!(checked,1024);
+    }
     fn world_parse_fixture()->(Value,crate::ivp_surface_registry::Registry){
         let fixture:Value=serde_json::from_str(include_str!("../tools/fixtures/native-ivp-world-table-parse.json")).unwrap();
         let mut registry=crate::ivp_surface_registry::Registry::default();

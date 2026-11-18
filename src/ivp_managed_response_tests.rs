@@ -10,7 +10,7 @@ fn world(c:&Value)->ResponseWorld{
     let objects=(0..2).map(|side|{let e=&c["endpoints"][side];let core=e["object"].as_u64().unwrap() as usize-1;let s=&c["shapes"][side];let m=&c["bodies"][core]["material"];(core as u64+1,Object{core,rotation:rows(&s["rotation"]),translation:vec(&s["translation"]),radius:f(&s["radius"]),material_flags:m["flags"].as_u64().unwrap() as u32,friction:f(&m["friction"])})}).collect();
     let k=&c["settings"];ResponseWorld::new(registry,bodies,objects,Settings{dt:f(&c["dt"]),admission:AdmissionSettings{distance:f(&k["distance"]),area_epsilon:k["area_epsilon"].as_f64().unwrap()},refresh:ivp_refresh::Settings{epsilon:f(&k["epsilon"]),bary_bias:f(&k["bary_bias"]),area_epsilon:k["area_epsilon"].as_f64().unwrap(),one:f(&k["one"]),opposite:f(&k["opposite"])},threshold_extra:f(&k["threshold_extra"]),minimum_impulse:f(&k["minimum_impulse"]),minimum_determinant_squared:f(&k["minimum_determinant_squared"])},c["time"].as_f64().unwrap()).unwrap()
 }
-fn features(c:&Value)->[Feature;2]{std::array::from_fn(|i|Feature{endpoint:endpoint(&c["endpoints"][i]),vertices:rows(&c["shapes"][i]["vertices"]),canonical:rows(&c["shapes"][i]["canonical"])})}
+fn features(c:&Value)->[Feature;2]{std::array::from_fn(|i|Feature{material_code:0,endpoint:endpoint(&c["endpoints"][i]),vertices:rows(&c["shapes"][i]["vertices"]),canonical:rows(&c["shapes"][i]["canonical"])})}
 fn compare(a:&Value,b:&Value,path:&str){match(a,b){
     (Value::Object(a),Value::Object(b))=>for(k,v)in a{compare(v,&b[k],&format!("{path}.{k}"));},
     (Value::Array(a),Value::Array(b))=>{assert_eq!(a.len(),b.len(),"{path}");for(i,(a,b))in a.iter().zip(b).enumerate(){compare(a,b,&format!("{path}[{i}]"));}},

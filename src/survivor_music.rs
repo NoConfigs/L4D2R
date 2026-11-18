@@ -299,7 +299,8 @@ pub fn alerts(
     }
 }
 /// Round-end and safe-room cues:
-/// - OnEnterCheckpoint 102ac620: Event.SafeRoom (the exit checkpoint).
+/// - OnEnterCheckpoint 102ac620: Event.SafeRoom once the exit checkpoint is
+///   sealed (everyone inside, door shut).
 /// - OnMissionLost 102afc50: Event.ScenarioLose when every survivor is down.
 /// - OnMissionWon 102ac590: Event.ScenarioWin when the finale is won.
 /// - OnFinaleFinalBattle 102ac530: Event.FinalBattle once the finale escape
@@ -347,7 +348,7 @@ pub fn outcomes(
     }
     let down = |dead: bool, incap: bool| dead || incap;
     let now = Outcome {
-        checkpoint: checkpoint.as_ref().is_some_and(|c| c.goal.is_some()),
+        checkpoint: checkpoint.as_ref().is_some_and(|c| c.sealed),
         lost: down(s.dead, s.incap)
             && squad.as_ref().is_none_or(|q| q.0.iter().all(|m| down(m.state.dead, m.state.incap))),
         won: logic.as_ref().is_some_and(|l| l.world.cine.finale_won),

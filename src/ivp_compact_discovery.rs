@@ -22,6 +22,17 @@ struct Location{broad:usize,key:crate::ivp_surface_admission::Pair}
 pub(crate) struct Discovery<'a>{world:bounds::World,objects:BTreeMap<usize,Object<'a>>,order:Vec<usize>,motion:BTreeMap<usize,crate::ivp_minimizer::owner::Properties>,far:BTreeMap<usize,f32>,coarse:BTreeMap<usize,Contacts<'a>>,locations:BTreeMap<usize,Location>,ledges:BTreeMap<(usize,usize),u32>,dt:f32}
 
 impl<'a> Discovery<'a>{
+ #[cfg(test)]
+ pub(crate) fn query_snapshot(&self,owner:&super::ownership::Ownership,queue:&crate::ivp_event_queue::Queue)->Result<serde_json::Value,&'static str>{
+  let mut rows=vec![];
+  for (&id,loc) in &self.locations{let entry=self.coarse[&loc.broad].entries().iter().find(|e|e.key==loc.key).ok_or("diagnostic compact entry missing")?;let q=&entry.contact.query;
+   rows.push(serde_json::json!({"id":id,"objects":owner.graph.objects(id)?.map(|i|i-1),"flags":entry.contact.flags,"kinds":q.kinds,"frame":q.frame,"geometry":q.geometry.map(|g|[g.projection.to_bits(),g.distance.to_bits(),g.normal.x.to_bits(),g.normal.y.to_bits(),g.normal.z.to_bits()]),"queue":queue.scheduled(id).map(|(epoch,key)|[epoch.to_bits(),key.to_bits() as u64])}));
+  }Ok(serde_json::json!(rows))
+ }
+ pub(crate) fn snapshot_with_counters(&self,counters:&mut super::CounterSnapshot)->Self{
+  let coarse=self.coarse.iter().map(|(&id,c)|(id,c.snapshot_with_counters(counters))).collect();
+  Self{world:self.world.clone(),objects:self.objects.clone(),order:self.order.clone(),motion:self.motion.clone(),far:self.far.clone(),coarse,locations:self.locations.clone(),ledges:self.ledges.clone(),dt:self.dt}
+ }
  pub(crate) fn try_clone_ordinary(&self)->Result<Self,&'static str>{
   let coarse=self.coarse.iter().map(|(&id,c)|c.try_clone_ordinary().map(|c|(id,c))).collect::<Result<_,_>>()?;
   Ok(Self{world:self.world.clone(),objects:self.objects.clone(),order:self.order.clone(),motion:self.motion.clone(),far:self.far.clone(),coarse,locations:self.locations.clone(),ledges:self.ledges.clone(),dt:self.dt})
@@ -62,10 +73,30 @@ impl<'a> Discovery<'a>{
   let motion=registered.iter().map(|(&id,o)|(id,crate::ivp_minimizer::owner::Properties{radius:o.core_radius,inverse_diameter:(2.*o.core_radius).recip(),angular_speed:0.,angular_bound:o.cached_motion[1],sweep_axis:bevy::prelude::Vec3::X})).collect();
   Ok(Self{world:bounds::World::new(descriptors,order,dt)?,objects:registered,order:order.to_vec(),motion,far:BTreeMap::new(),coarse:BTreeMap::new(),locations:BTreeMap::new(),ledges,dt})
  }
+ ///100eb7d0 visits each unit core and its objects backwards after movement
+ /// polling.100e8cd0 reactivates eligible inactive queries before graph repair.
+ pub(crate) fn refresh_inactive_unit(&mut self,members:&[usize],owner:&mut super::ownership::Ownership,clock:Clock,bodies:&mut[Body],cache:&mut WorldCache,gravity:[f32;3])->Result<(),&'static str>{
+  for &core in members.iter().rev(){
+   let objects=self.order.iter().rev().copied().filter(|id|self.objects[id].core==core).collect::<Vec<_>>();
+   for object in objects{owner.notify_object(object,|owner,id,_|{
+    let slots=owner.graph.objects(id)?;let cores=slots.map(|s|self.objects[&s].core);let mut pair=cores.map(|c|bodies[c]);
+    for side in 0..2{cache.update_core(cores[side],pair[side].prediction)?;cache.set_flags(slots[side],pair[side].object_flags)?;}
+    let dt=self.dt;let (entry,convexes,_)=self.entry_mut(id)?;
+    let result=entry.refresh_inactive_owned(owner,id,[false;2],cache,clock,&mut pair,convexes,dt,gravity);
+    for side in 0..2{bodies[cores[side]]=pair[side];}result.map(|_|())
+   })?;}
+  }Ok(())
+ }
  ///100e8d60 temporarily marks the core/object as state0x21. Restore only the
  /// state bytes afterwards, preserving any unrelated flags changed by callbacks.
  /// Motion inputs are the native cached linear/angular bounds at this phase,
  /// not fresh velocity lengths: wake subsequently rebuilds/clears those caches.
+ ///100f1800 copies an awake movement classification without a wake/bounds
+ /// notification. Keep both flag caches current without rebuilding queries.
+ pub(crate) fn sync_active_flags(&mut self,id:usize,flags:u32,cache:&mut WorldCache)->Result<(),&'static str>{
+  if !self.objects.contains_key(&id)||(flags&255)==0||(flags&255)>3{return Err("invalid active object flag copy");}
+  self.world.set_flags(id,flags);cache.set_flags(id,flags)
+ }
  pub(crate) fn notify_wake(&mut self,id:usize,clock:Clock,cached_motion:[f32;2],bodies:&mut[Body],cache:&mut WorldCache,lifecycle:&mut dyn Lifecycle)->Result<Vec<bounds::Request>,&'static str>{
   let object=*self.objects.get(&id).ok_or("unknown compact discovery object")?;
   if cached_motion.iter().any(|v|!v.is_finite()||*v<0.){return Err("invalid compact wake motion bounds");}

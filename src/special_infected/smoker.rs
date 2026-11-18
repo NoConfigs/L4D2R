@@ -97,6 +97,8 @@ const HANG_RADIUS: f32 = 50. * UNIT;
 /// 300 units/sec when the pull point is above them (FUN_1036a7b0).
 const LIFT_RADIUS: f32 = 48. * UNIT;
 const LIFT_SPEED: f32 = 300. * UNIT;
+/// sv_gravity: a tongued victim off the ground still falls like a player.
+const FALL_GRAVITY: f32 = 800. * UNIT;
 /// smoker_pz_claw_dmg, claw_range, claw_swing_interval / _miss_interval.
 const CLAW_DAMAGE: f32 = 4.;
 const CLAW_RANGE: f32 = 52. * UNIT;
@@ -562,11 +564,14 @@ impl Smoker {
             let travel = (distance - stop).clamp(0., self.victim_speed * f.dt);
             let flat = horizontal.normalize_or_zero() * travel;
             let vertical = if lift {
+                self.victim_vertical = 0.;
                 (anchor.y - HEIGHT - position.y).clamp(0., LIFT_SPEED.min(VICTIM_MAX_SPEED) * f.dt)
             } else if grounded {
+                self.victim_vertical = 0.;
                 0.
             } else {
-                -GRAVITY_FORCE * f.dt * f.dt
+                self.victim_vertical += FALL_GRAVITY * f.dt;
+                -self.victim_vertical * f.dt
             };
             position = if lift {
                 // Lifting ignores the floor; walls and ceilings still block.
@@ -581,21 +586,26 @@ impl Smoker {
                 c.walk(position, flat + Vec3::Y * vertical, HEIGHT, grounded)
             };
         } else if !self.hanging && !grounded {
-            position = c.walk(
-                position,
-                Vec3::NEG_Y * GRAVITY_FORCE * f.dt * f.dt,
-                HEIGHT,
-                false,
-            );
+            self.victim_vertical += FALL_GRAVITY * f.dt;
+            position = c.walk(position, Vec3::NEG_Y * self.victim_vertical * f.dt, HEIGHT, false);
         }
         let grounded = c.grounded(position, HEIGHT);
         self.off_ground = if grounded { 0. } else { self.off_ground + f.dt };
+        if grounded {
+            self.victim_vertical = 0.;
+        }
+        // Only a tongue pulling from above can hold a victim off the ground;
+        // with the pull point at or below them they drop instead of floating.
+        let held = anchor.y > position.y + HEIGHT * 0.5;
+        if self.hanging && !held {
+            self.hanging = false;
+        }
         squad.0[i].position = position;
         hunter.rescue_point = Some(position);
         let toward = (anchor - position) * Vec3::new(1., 0., 1.);
         // Hanging choke: off the ground near the pull point (FUN_1036e1b0).
         let near = toward.length() < HANG_RADIUS;
-        if near && self.off_ground > HANG_TIME && !self.hanging {
+        if near && held && self.off_ground > HANG_TIME && !self.hanging {
             self.choking = true;
             self.hanging = true;
             self.damage_clock = DAMAGE_INTERVAL;
@@ -1587,6 +1597,37 @@ mod tests {
         assert!(rig.smoker.hanging, "{:?}", rig.squad.0[0].position);
         assert_eq!(rig.smoker.pose, VictimPose::Hanging);
         assert!(rig.squad.0[0].position.y > 0.5);
+    }
+    #[test]
+    fn a_victim_dragged_off_a_ledge_falls_to_the_smoker_instead_of_floating() {
+        let mut c = Collision::test_solid_floor();
+        // The victim stands on a 3 m ledge; the Smoker is on the floor below.
+        c.test_add_box(Vec3::new(-2., 0., -1.), Vec3::new(2., 3., 1.));
+        let mut rig = Rig::new(Vec3::new(0., 3., -0.5));
+        rig.c = c;
+        let mut f = frame(false);
+        f.feet = Vec3::new(0., 0., -5.);
+        f.eye = f.feet + Vec3::Y * (62. * UNIT);
+        f.aim = (Vec3::new(0., 3.9, -0.5) - f.eye).normalize();
+        f.fire = true;
+        rig.run(&f, 1);
+        f.fire = false;
+        let mut lowest = f32::INFINITY;
+        let mut attached = false;
+        for _ in 0..30 * 6 {
+            rig.run(&f, 1);
+            if rig.smoker.state != TongueState::Attached {
+                if attached {
+                    break;
+                }
+                continue;
+            }
+            attached = true;
+            assert!(!rig.smoker.hanging, "hanging from a tongue below: {:?}", rig.squad.0[0].position);
+            lowest = lowest.min(rig.squad.0[0].position.y);
+        }
+        assert!(attached, "the tongue never grabbed: {:?}", rig.smoker.state);
+        assert!(lowest < 0.1, "the victim never reached the floor: {lowest}");
     }
     #[test]
     fn the_tongue_rope_keeps_its_ends_and_bends_and_wobbles_only_mid_span() {

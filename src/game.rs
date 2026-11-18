@@ -3359,7 +3359,11 @@ pub(crate) fn combat(
             s.select_inventory_slot(1);
         }
         let eye = body.feet + Vec3::Y * body.stance.eye();
+        // L4D2R_AUTOFIRE_FIXED: keep the start view and fire straight ahead
+        // for 1.5 s (bullet-hole checks).
+        let fixed = std::env::var_os("L4D2R_AUTOFIRE_FIXED").is_some();
         let target = enemies.iter()
+            .filter(|_| !fixed)
             .filter(|(_, _, e)| e.health > 0. && e.model.contains("/common_"))
             .map(|(_, t, _)| t.translation + Vec3::Y * 1.1)
             .min_by(|a, b| a.distance(eye).total_cmp(&b.distance(eye)));
@@ -3378,7 +3382,7 @@ pub(crate) fn combat(
             println!("L4D2RAUTO t={:.2} target={:?} slot={} class={} ammo={} reload={:.2} feet={:?}",
                 s.elapsed, target.map(|p| p.distance(eye)), s.slot, s.gun().class, s.gun().ammo, s.reload, body.feet);
         }
-        target.is_some()
+        target.is_some() || (fixed && s.elapsed < std::env::var("L4D2R_AUTOFIRE").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.) + 1.5)
     };
     let fire = autofire && s.cooldown <= 0. || std::mem::take(&mut input.fire)
         || (weapon.automatic() && input.fire_held)
@@ -3627,11 +3631,11 @@ pub(crate) fn combat(
             }
         }
         if !weapon.melee() {
-            for &(distance, normal) in &path.marks {
+            for &(distance, normal, material) in &path.marks {
                 let p = origin + direction * distance;
                 if !decal_on_movable(cinematic.as_deref(), p) {
                     if let Some(impacts) = impacts.as_mut() {
-                        impacts.hits.push((p, normal));
+                        impacts.hits.push((p, normal, material));
                     }
                 }
             }
@@ -5398,13 +5402,13 @@ fn squad_ai(
                         break;
                     }
                     hits.extend(path.hits.into_iter().map(|h| h.1));
-                    marks.extend(path.marks.iter().map(|&(distance, normal)| (origin + ray * distance, normal)));
+                    marks.extend(path.marks.iter().map(|&(distance, normal, material)| (origin + ray * distance, normal, material)));
                 }
                 if obstructed_by_survivor {
                     continue;
                 }
                 if let Some(impacts) = impacts.as_mut() {
-                    impacts.hits.extend(marks.into_iter().filter(|(p, _)| !decal_on_movable(cinematic.as_deref(), *p)));
+                    impacts.hits.extend(marks.into_iter().filter(|(p, _, _)| !decal_on_movable(cinematic.as_deref(), *p)));
                 }
                 member.state.gun_mut().ammo -= 1;
                 animation_state.5.fired(index, weapon);

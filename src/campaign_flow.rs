@@ -21,6 +21,9 @@ pub struct Checkpoint {
     pub door: Option<(usize, Vec3)>,
     /// Seconds until the next door-closing check (None: not armed).
     door_clock: Option<f32>,
+    /// Every living survivor is inside with the checkpoint door shut: the
+    /// chapter is ending (Event.SafeRoom plays from here).
+    pub sealed: bool,
 }
 /// Retail SurvivorBotReachedCheckpoint (server.dll 103b3f60/103b4090): once
 /// every living survivor is inside, a bot checks after RandomFloat(1, 2) s
@@ -186,6 +189,7 @@ pub fn update(
             checkpoint.door_clock = None;
         }
     }
+    checkpoint.sealed = gathered && closed;
     if !gathered || !closed {
         checkpoint.clock = 0.;
         checkpoint.exit = Some(id);

@@ -13,7 +13,17 @@ impl History {
     ///100f0460 only resets movement clocks; it does not invalidate geometry.
     pub(crate) fn reset_clock(&mut self,now:f64)->Result<(),&'static str>{if !now.is_finite(){return Err("invalid movement reset clock");}self.close_time=now;self.far_time=now;Ok(())}
 }
+#[cfg(test)]
+thread_local!{pub(crate) static AUDIT:std::cell::RefCell<Option<Vec<serde_json::Value>>>=const{std::cell::RefCell::new(None)};}
 pub(crate) fn classify(h:&mut History,i:Input,now:f64,k:&Settings)->Result<u8,&'static str>{
+    #[cfg(test)] let before=*h;
+    let result=classify_inner(h,i,now,k);
+    #[cfg(test)] AUDIT.with(|a|{if let Some(rows)=a.borrow_mut().as_mut(){
+        let history=|h:History|serde_json::json!({"close_time":h.close_time.to_bits(),"far_time":h.far_time.to_bits(),"close_position":h.close_position.to_array().map(f32::to_bits),"far_position":h.far_position.to_array().map(f32::to_bits),"close_quat":h.close_quat.map(f32::to_bits),"far_quat":h.far_quat.map(f32::to_bits)});
+        rows.push(serde_json::json!({"now":now.to_bits(),"before":history(before),"after":history(*h),"input":format!("{i:?}"),"result":result.ok()}));
+    }});result
+}
+fn classify_inner(h:&mut History,i:Input,now:f64,k:&Settings)->Result<u8,&'static str>{
     if !now.is_finite()||!h.close_time.is_finite()||!h.far_time.is_finite()||!i.radius.is_finite()||i.radius<=0.||!i.sleep_time.is_finite()||i.sleep_time<=0.
         ||![i.angular,i.position,h.close_position,h.far_position].iter().all(|v|v.is_finite())||![i.start,i.end,h.close_quat,h.far_quat].iter().flatten().all(|v|v.is_finite())
         ||![k.translation_squared,k.rotation_squared,k.far_translation_squared,k.far_rotation_squared,k.far_timeout,k.one,k.two,k.angular_factor0,k.angular_factor1].iter().all(|v|v.is_finite()){return Err("invalid movement classifier input");}

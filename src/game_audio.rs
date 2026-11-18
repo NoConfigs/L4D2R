@@ -227,6 +227,8 @@ pub struct Voice(pub String, pub f64);
 /// Engine snd_max_same_sounds / snd_max_same_weapon_sounds defaults.
 pub const MAX_SAME_SOUNDS: usize = 4;
 pub const MAX_SAME_WEAPON_SOUNDS: usize = 3;
+/// Seconds a voice stolen by the same-sound limit takes to ramp out.
+pub const STEAL_FADE: f32 = 0.06;
 #[derive(Component)]
 pub struct FadeOut {
     remaining: f32,
@@ -450,14 +452,18 @@ pub fn playback(
             .filter(|_| !looping && !definition.dry && request.position.is_some())
             .zip(sources.get(&handle).cloned());
         // Retail engine snd_max_same_sounds (4) / snd_max_same_weapon_sounds
-        // (3): a new copy of a wave stops the oldest playing one.
+        // (3): a new copy of a wave stops the oldest playing one. Cutting it
+        // mid-waveform clicks (constant while shooting into a horde), so the
+        // stolen voice ramps out over a few frames instead and stops counting.
         if !looping {
             let limit = if path.contains("weapons/") { MAX_SAME_WEAPON_SOUNDS } else { MAX_SAME_SOUNDS };
             let playing = same.entry(path.clone()).or_default();
             playing.sort_by(|a, b| a.0.total_cmp(&b.0));
             while playing.len() >= limit {
                 let (_, oldest) = playing.remove(0);
-                commands.entity(oldest).despawn();
+                if let Ok(mut stolen) = commands.get_entity(oldest) {
+                    stolen.remove::<Voice>().try_insert(FadeOut::new(STEAL_FADE));
+                }
             }
         }
         let mut entity = if let (Some((preset, source)), Some(rooms), Some(bus)) = (reverb, rooms.as_mut(), bus.as_ref()) {

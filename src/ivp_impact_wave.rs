@@ -86,7 +86,7 @@ impl Wave{
 #[cfg(test)]mod tests{
  use super::*;
  use bevy::prelude::*;
- fn features(cores:[usize;2])->[crate::ivp_managed_response::Feature;2]{cores.map(|id|crate::ivp_managed_response::Feature{endpoint:crate::ivp_create::Endpoint{object:id as u64+1,feature:crate::ivp_create::Feature{kind:3,edge:0,opposite:0,triangle:0,ledge:0,vertex:0,vertices:[Vec3::ZERO;3]}},vertices:[Vec3::ZERO;3],canonical:[Vec3::ZERO;3]})}
+ fn features(cores:[usize;2])->[crate::ivp_managed_response::Feature;2]{cores.map(|id|crate::ivp_managed_response::Feature{material_code:0,endpoint:crate::ivp_create::Endpoint{object:id as u64+1,feature:crate::ivp_create::Feature{kind:3,edge:0,opposite:0,triangle:0,ledge:0,vertex:0,vertices:[Vec3::ZERO;3]}},vertices:[Vec3::ZERO;3],canonical:[Vec3::ZERO;3]})}
  #[test]
  fn native_neighbor_waves_select_and_solve_over_the_source_body_bank(){
   let data:serde_json::Value=serde_json::from_str(include_str!("../tools/fixtures/native-ivp-impact-neighbor.json")).unwrap();let mut queries=0;let mut solves=0;

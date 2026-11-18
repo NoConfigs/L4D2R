@@ -2,9 +2,7 @@ use super::*;
 use l4d2_formats::phy::CompactEdge;
 #[test]
 fn typed_routes_follow_the_live_table_and_native_wrapper_role_invariants(){
- // Local research fixture (not in the repository); skipped when absent.
- let Ok(text)=std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"),"/local-research/parity/ivp-feature-table-1109-native-provenance.json")) else {eprintln!("skipped: local ivp feature table fixture missing");return;};
- let table:serde_json::Value=serde_json::from_str(&text).unwrap();
+ let table:serde_json::Value=serde_json::from_str(include_str!("../tools/fixtures/native-ivp-feature-table.json")).unwrap();
  let kinds=[Kind::Point,Kind::Edge,Kind::Face,Kind::Sphere];let mut valid=0;
  for a in kinds{for b in kinds{for selected in 0..2{
     let physical=[a,b];let ordered=[physical[selected],physical[1-selected]];let wrapper=table["entries"][ordered[0] as usize*4+ordered[1] as usize].as_u64().unwrap() as u32;

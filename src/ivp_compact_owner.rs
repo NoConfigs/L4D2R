@@ -9,9 +9,11 @@ use crate::{ivp_surface_admission::contacts::{Entry,ownership::Ownership,TimedEv
  ivp_minimizer::owner::{Properties,Schedule},ivp_distance_schedule::Config};
 use l4d2_formats::phy::Convex;
 use std::{cell::RefCell,collections::BTreeMap};
+#[cfg(test)]
+thread_local!{pub(crate) static OWNER_AUDIT:RefCell<Option<Vec<serde_json::Value>>>=const{RefCell::new(None)};}
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
-pub(crate) enum Phase{Prediction,Predicted,Timed,Impact,Woken,Rebuilt}
+pub(crate) enum Phase{Inactive,Prediction,Predicted,Timed,Impact,Woken,Rebuilt}
 #[derive(Clone,Copy)]
 pub(crate) struct Event<'a>{pub phase:Phase,pub clock:Clock,pub objects:Option<[usize;2]>,pub flags:u32,pub bodies:&'a [Body],#[cfg(test)] pub contacts:&'a crate::ivp_managed_response::ResponseWorld}
 pub(crate) struct Owner<'a>{
@@ -19,6 +21,10 @@ pub(crate) struct Owner<'a>{
  flags:BTreeMap<usize,u32>,core_objects:BTreeMap<usize,usize>,gravity:[f32;3],config:Config,face_epsilon:f32,psi_owner:usize,
 }
 impl<'a> Owner<'a>{
+ #[cfg(test)]
+ fn audit(&self,clock:Clock,phase:Phase,queue:&Queue)->Result<(),&'static str>{
+  if OWNER_AUDIT.with(|a|a.borrow().is_some()){let row=serde_json::json!({"time":clock.time.to_bits(),"phase":format!("{phase:?}"),"queries":self.discovery.query_snapshot(&self.ownership,queue)?});OWNER_AUDIT.with(|a|a.borrow_mut().as_mut().unwrap().push(row));}Ok(())
+ }
  /// Take already registered/discovered state without rebuilding contacts or
  /// resampling caches. Physical endpoint IDs and cache-object IDs are explicit.
  pub(crate) fn from_parts(discovery:Discovery<'a>,ownership:Ownership,mut cache:WorldCache,physical:&ContactWorld,gravity:[f32;3],config:Config,face_epsilon:f32)->Result<Self,&'static str>{
@@ -40,16 +46,23 @@ impl<'a> Owner<'a>{
  }
  fn staged(&self)->Result<Self,&'static str>{
   if self.cache.metadata().0.iter().any(|s|s.references!=0){return Err("compact tick started with outstanding cache leases");}
-  Ok(Self{discovery:self.discovery.try_clone_ordinary()?,ownership:self.ownership.try_clone_unbound()?,cache:self.cache.clone(),flags:self.flags.clone(),core_objects:self.core_objects.clone(),gravity:self.gravity,config:self.config,face_epsilon:self.face_epsilon,psi_owner:self.psi_owner})
+  Ok(Self{discovery:self.discovery.snapshot_with_counters(&mut super::super::CounterSnapshot::default()),ownership:self.ownership.try_clone_unbound()?,cache:self.cache.clone(),flags:self.flags.clone(),core_objects:self.core_objects.clone(),gravity:self.gravity,config:self.config,face_epsilon:self.face_epsilon,psi_owner:self.psi_owner})
  }
  pub(crate) fn into_parts(self)->(Discovery<'a>,Ownership,WorldCache){(self.discovery,self.ownership,self.cache)}
  #[cfg(test)]
  pub(crate) fn snapshot(&self)->serde_json::Value{
-  serde_json::json!({"bounds":format!("{:?}",self.discovery.world),"ownership":format!("{:?}",self.ownership),"cache":format!("{:?}",self.cache),
+  serde_json::json!({"cache_frames":self.core_objects.iter().map(|(&core,&object)|self.cache.object_frame(object).ok().map(|f|serde_json::json!({"core":core,"object":object,"frame":f.frame_stamp,"quaternion":f.quaternion.map(f32::to_bits),"matrix":f.pose.rotation.to_cols_array().map(f32::to_bits)}))).collect::<Vec<_>>(),"bounds":format!("{:?}",self.discovery.world),"ownership":format!("{:?}",self.ownership),"cache":format!("{:?}",self.cache),
    "contacts":self.discovery.coarse.iter().map(|(&id,c)|serde_json::json!({"broad":id,"entries":c.entries().iter().map(|e|serde_json::json!({"slots":e.key.slots,"ledges":e.key.ledges,"contact":format!("{:?}",e.contact)})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
    "locations":self.discovery.locations.iter().map(|(&id,l)|serde_json::json!([id,l.broad,l.key.slots,l.key.ledges])).collect::<Vec<_>>(),
    "objects":self.discovery.order.iter().map(|&id|serde_json::json!({"id":id,"motion":self.discovery.motion_snapshot(id),"far":self.discovery.far_snapshot(id)})).collect::<Vec<_>>(),
    "flags":self.flags,"core_objects":self.core_objects,"gravity":self.gravity.map(f32::to_bits),"targets":self.config.targets.map(f32::to_bits).to_vec(),"epsilon":self.face_epsilon.to_bits(),"psi_owner":self.psi_owner})
+ }
+ /// Public material edits share the native cache pool with future geometry.
+ /// Commit both owners together so a rejected edit cannot leak cache leases.
+ pub(crate) fn assign_material(&mut self,physical:&mut ContactWorld,object:u64,index:i32)->Result<(),&'static str>{
+  let mut owner=self.staged()?;let mut world=physical.clone();if !world.prepare_material_assignment(object,index)?{return Ok(());}
+  world.with_candidate_context(|context,clock,deadline,queue|owner.wake_endpoints([object as usize],context,clock,deadline,queue))?;
+  world.refresh_material_assignment_cached(object,&mut owner.cache)?;*self=owner;*physical=world;Ok(())
  }
  pub(crate) fn advance(&mut self,physical:&mut ContactWorld,delta:f32)->Result<(),&'static str>{self.advance_observed(physical,delta,|_|Ok(()))}
  /// Only these two owners commit. Observer-owned side effects are external and
@@ -57,12 +70,22 @@ impl<'a> Owner<'a>{
  pub(crate) fn advance_observed(&mut self,physical:&mut ContactWorld,delta:f32,mut observe:impl FnMut(Event<'_>)->Result<(),&'static str>)->Result<(),&'static str>{
   if physical.clock().prediction_owner()!=self.psi_owner||physical.bodies().len()!=self.core_objects.len(){return Err("compact tick physical membership changed");}
   let next=RefCell::new(self.staged()?);let observer=RefCell::new(&mut observe);
-  physical.advance_with_mutable_cache_context(delta,|bodies,ids,clock|next.borrow_mut().prepare(bodies,ids,clock),|context,order,notices,clock,deadline,queue|{
+  physical.advance_with_lifecycle_context(delta,|bodies,ids,clock|next.borrow_mut().prepare(bodies,ids,clock),|context,clock,deadline,queue|{
+   let queued=context.pending_cores().into_iter().rev().map(|core|next.borrow().core_objects[&core]).collect::<Vec<_>>();
+   next.borrow_mut().wake_endpoints(queued,context,clock,deadline,queue)?;
+   let notices=context.take_object_notifications();next.borrow_mut().notify_objects(context,&notices,clock,deadline,queue)
+  },|context,members,clock,_,queue|{
+   let mut owner=next.borrow_mut();let Owner{discovery,ownership,cache,gravity,..}=&mut *owner;
+   ownership.with_queue(queue,|ownership|discovery.refresh_inactive_unit(members,ownership,clock,context.bodies_mut()?,cache,*gravity))?;
+   observer.borrow_mut()(Event{#[cfg(test)] contacts:context.contacts_for_observer(),bodies:context.bodies()?,phase:Phase::Inactive,clock,objects:None,flags:0})
+  },|context,order,notices,clock,deadline,queue|{
    let mut owner=next.borrow_mut();observer.borrow_mut()(Event{#[cfg(test)] contacts:context.contacts_for_observer(),bodies:context.bodies()?,phase:Phase::Prediction,clock,objects:None,flags:0})?;
    owner.predict(context,order,notices,clock,deadline,queue)?;
+   #[cfg(test)] owner.audit(clock,Phase::Prediction,queue)?;
    observer.borrow_mut()(Event{#[cfg(test)] contacts:context.contacts_for_observer(),bodies:context.bodies()?,phase:Phase::Predicted,clock,objects:None,flags:0})
   },|context,id,clock,deadline,queue|{
    let mut owner=next.borrow_mut();let objects=owner.ownership.graph.objects(id)?;
+   #[cfg(test)] owner.audit(clock,Phase::Timed,queue)?;
    observer.borrow_mut()(Event{#[cfg(test)] contacts:context.contacts_for_observer(),bodies:context.bodies()?,phase:Phase::Timed,clock,objects:Some(objects),flags:owner.ownership.graph.flags(id)?})?;
    let out={let Owner{discovery,ownership,cache,gravity,config,face_epsilon,..}=&mut *owner;
     discovery.dispatch_ordinary_event(id,ownership,queue,clock,deadline,context.bodies_mut()?,cache,*gravity,*config,*face_epsilon)?};
@@ -83,13 +106,14 @@ impl<'a> Owner<'a>{
     let dt=discovery.dt;
     discovery.rebuild_bounds(&motion,clock,deadline,context.bodies_mut()?,cache,&mut Constructor{owner:ownership,queue,clock,deadline,dt,gravity:*gravity,config:*config,face_epsilon:*face_epsilon,psi_owner:*psi_owner})?;
     ownership.with_queue(queue,|owner|discovery.recheck_impact_pairs(&changed,owner,clock,deadline,context.bodies_mut()?,cache,*gravity,*config,*face_epsilon))?;
+    #[cfg(test)] owner.audit(clock,Phase::Rebuilt,queue)?;
     // Bounds callbacks may retire the descriptor; retain its collision-entry flags for this diagnostic.
     observer.borrow_mut()(Event{#[cfg(test)] contacts:context.contacts_for_observer(),bodies:context.bodies()?,phase:Phase::Rebuilt,clock,objects:Some(objects),flags:impact_flags})?;
    }Ok(())
   })?;
   *self=next.into_inner();Ok(())
  }
- fn wake_endpoints(&mut self,objects:[usize;2],physical:&mut CollisionContext<'_>,clock:Clock,deadline:f64,queue:&mut Queue)->Result<(),&'static str>{
+ fn wake_endpoints(&mut self,objects:impl IntoIterator<Item=usize>,physical:&mut CollisionContext<'_>,clock:Clock,deadline:f64,queue:&mut Queue)->Result<(),&'static str>{
   let Self{discovery,ownership,cache,flags,gravity,config,face_epsilon,psi_owner,core_objects}=self;let dt=discovery.dt;
   for object in objects{
    let core=discovery.objects[&object].core;
@@ -116,12 +140,17 @@ impl<'a> Owner<'a>{
  fn prepare(&mut self,bodies:&[Body],ids:&[usize],clock:Clock)->Result<(),&'static str>{
   for &core in ids{let object=*self.core_objects.get(&core).ok_or("unregistered compact cache core")?;self.cache.update_core(core,bodies[core].prediction)?;self.cache.set_flags(object,bodies[core].object_flags)?;self.cache.access(object,clock)?;}Ok(())
  }
- fn predict(&mut self,context:&mut CollisionContext<'_>,order:&[usize],notices:&[usize],clock:Clock,deadline:f64,queue:&mut Queue)->Result<(),&'static str>{
+ fn notify_objects(&mut self,context:&mut CollisionContext<'_>,notices:&[usize],clock:Clock,deadline:f64,queue:&mut Queue)->Result<(),&'static str>{
   let Self{discovery,ownership,cache,gravity,config,face_epsilon,psi_owner,core_objects,flags} = self;
   let dt=discovery.dt;
   for &core in notices{
    let object=*core_objects.get(&core).ok_or("unregistered compact notification core")?;
    if flags.get(&object)==Some(&context.bodies()?[core].object_flags){continue;}
+   let before=*flags.get(&object).ok_or("missing compact object flags")?;let after=context.bodies()?[core].object_flags;
+   if before&!255==after&!255&&(1..=3).contains(&(before&255))&&(1..=3).contains(&(after&255)){
+    discovery.sync_active_flags(object,after,cache)?;flags.insert(object,after);continue;
+   }
+
    let mut constructor=Constructor{owner:ownership,queue,clock,deadline,dt,gravity:*gravity,config:*config,face_epsilon:*face_epsilon,psi_owner:*psi_owner};
    if context.bodies()?[core].object_flags&255==8{
     discovery.notify_sleep(object,clock,context.bodies_mut()?,cache,&mut constructor)?;
@@ -131,6 +160,11 @@ impl<'a> Owner<'a>{
    }
    flags.insert(object,context.bodies()?[core].object_flags);
   }
+  Ok(())
+ }
+ fn predict(&mut self,context:&mut CollisionContext<'_>,order:&[usize],notices:&[usize],clock:Clock,deadline:f64,queue:&mut Queue)->Result<(),&'static str>{
+  self.notify_objects(context,notices,clock,deadline,queue)?;
+  let Self{discovery,ownership,cache,gravity,config,face_epsilon,psi_owner,core_objects,flags}=self;let dt=discovery.dt;
   if core_objects.iter().any(|(&core,&object)|flags.get(&object)!=Some(&context.bodies().unwrap()[core].object_flags)){return Err("compact object flag transition lacks a notification");}
   let motion=order.iter().map(|&id|context.prediction_motion(id).map(|m|(id,m))).collect::<Result<Vec<_>,_>>()?;
   discovery.predict_bounds(&motion,clock,deadline,context.bodies_mut()?,cache,&mut Constructor{owner:ownership,queue,clock,deadline,dt,gravity:*gravity,config:*config,face_epsilon:*face_epsilon,psi_owner:*psi_owner})?;

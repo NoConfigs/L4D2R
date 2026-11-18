@@ -83,8 +83,9 @@ pub struct Target<T> {
 pub struct Path<T> {
     /// Characters hit, nearest first, with their distances.
     pub hits: Vec<(f32, T)>,
-    /// Wall faces the bullet struck or left: (distance, normal).
-    pub marks: Vec<(f32, Vec3)>,
+    /// Wall faces the bullet struck or left: (distance, normal, game
+    /// material).
+    pub marks: Vec<(f32, Vec3, u8)>,
     /// Where the bullet stopped.
     pub end: f32,
 }
@@ -132,7 +133,7 @@ pub fn walk<T>(
         let Some(w) = next else {
             return path;
         };
-        path.marks.push((w.entry, w.normal));
+        path.marks.push((w.entry, w.normal, w.material));
         path.end = w.entry;
         if layers <= 1 || (pen.max_distance > 0. && w.entry > pen.max_distance) {
             return path;
@@ -148,7 +149,7 @@ pub fn walk<T>(
             return path;
         }
         layers -= 1;
-        path.marks.push((exit, -w.normal));
+        path.marks.push((exit, -w.normal, w.exit_material));
         // Skip any characters inside the wall.
         while targets.next_if(|t| t.distance < exit).is_some() {}
         from = exit + 0.01 * UNIT;

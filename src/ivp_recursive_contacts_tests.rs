@@ -9,11 +9,39 @@ fn initialize<'a>(_:&Pair,e:&mut Entry<'a>,convexes:[&Convex;2],s:&Scene)->Resul
  Ok(())
 }
 fn tree(entries:&[Entry<'_>])->serde_json::Value{serde_json::json!(entries.iter().map(|e|{let mut p=serde_json::json!({"ledges":e.key.ledges,"kinds":e.contact.query.kinds,"recursive":e.recursive.is_some()});if let Some(r)=e.recursive.as_ref(){p["split"]=serde_json::json!(r.split.map_or(-1,|n|n as i32));p["descendant_count"]=serde_json::json!(r.count.load(Ordering::Relaxed));p["children"]=tree(r.descendants.entries());}p}).collect::<Vec<_>>())}
+fn staged_replay(parent:&Entry<'_>,s:&Scene,c:&serde_json::Value,dispatch:bool){
+ let original_tree=tree(std::slice::from_ref(parent));let original_root=s.root.load(Ordering::Relaxed);
+ if c["calls"]==1&&c["children"].as_u64().unwrap()>0{
+  let mut rejected_counters=CounterSnapshot::default();let mut rejected=parent.snapshot_with_counters(&mut rejected_counters);
+  let rejected_scene=Scene{frames:s.frames,input:s.input,root:rejected_counters.counter(&s.root),limit:s.limit,fallback:s.fallback,margin:s.margin,frame:s.frame};
+  let mut reached=false;
+  let mut initialize_rejected=|key:&Pair,entry:&mut Entry<'_>,convexes:[&Convex;2]|{initialize(key,entry,convexes,&rejected_scene)?;reached=true;Err("reject recursive child initialization")};
+  let result=if dispatch{rejected.dispatch_contact(s.input,&rejected_scene.root,s.limit,s.fallback,|_|Ok(()),&mut initialize_rejected,retire).map(|_|())}else{rejected.expand(s.input,&rejected_scene.root,s.limit,s.fallback,&mut initialize_rejected,retire).map(|_|())};
+  assert!(reached);assert_eq!(result,Err("reject recursive child initialization"));
+  assert_eq!(tree(std::slice::from_ref(parent)),original_tree);assert_eq!(s.root.load(Ordering::Relaxed),original_root);
+ }
+ let mut counters=CounterSnapshot::default();let mut candidate=parent.snapshot_with_counters(&mut counters);
+ let candidate_scene=Scene{frames:s.frames,input:s.input,root:counters.counter(&s.root),limit:s.limit,fallback:s.fallback,margin:s.margin,frame:s.frame};
+ assert!(!Arc::ptr_eq(&candidate_scene.root,&s.root));
+ let physical=std::cell::Cell::new(0);
+ if dispatch{candidate.dispatch_contact(s.input,&candidate_scene.root,s.limit,s.fallback,|_|{physical.set(physical.get()+1);Ok(())},|k,e,c|initialize(k,e,c,&candidate_scene),retire).unwrap();assert_eq!(physical.get(),c["physical_calls"].as_u64().unwrap() as usize);}
+ else{candidate.expand(s.input,&candidate_scene.root,s.limit,s.fallback,|k,e,c|initialize(k,e,c,&candidate_scene),retire).unwrap();}
+ assert_eq!(tree(candidate.recursive.as_ref().unwrap().descendants.entries()),c["tree"],"staged case{}",c["id"]);
+ assert_eq!(candidate_scene.root.load(Ordering::Relaxed),c["total"].as_i64().unwrap() as i32);
+ assert_eq!(tree(std::slice::from_ref(parent)),original_tree);assert_eq!(s.root.load(Ordering::Relaxed),original_root);
+ // Clone an expanded hierarchy, then tear it down independently.
+ let expanded_tree=tree(std::slice::from_ref(&candidate));let mut second=CounterSnapshot::default();let mut expanded=candidate.snapshot_with_counters(&mut second);let root=second.counter(&candidate_scene.root);
+ let key=expanded.key;retire(&key,&mut expanded).unwrap();assert_eq!(root.load(Ordering::Relaxed),c["after_delete_count"].as_i64().unwrap() as i32);
+ assert_eq!(tree(std::slice::from_ref(&candidate)),expanded_tree);assert_eq!(candidate_scene.root.load(Ordering::Relaxed),c["total"].as_i64().unwrap() as i32);
+ let key=candidate.key;retire(&key,&mut candidate).unwrap();assert_eq!(candidate_scene.root.load(Ordering::Relaxed),c["after_delete_count"].as_i64().unwrap() as i32);
+ assert_eq!(tree(std::slice::from_ref(parent)),original_tree);assert_eq!(s.root.load(Ordering::Relaxed),original_root);
+}
+
 #[test]
 fn recursive_split_requests_child_hierarchies_and_counter_teardown_match_native(){
  let data:serde_json::Value=serde_json::from_str(include_str!("../tools/fixtures/native-ivp-recursive-contacts.json")).unwrap();
- // Local research fixture (not in the repository); skipped when absent.
- let Ok(phy)=std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"),"/local-research/parity/ivp-bounds-1025-bound-cores/4.phy")) else {eprintln!("skipped: local pallet .phy fixture missing");return;};
+ // Retail geometry stays local; missing evidence must fail this validation.
+ let phy=std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"),"/local-research/parity/ivp-bounds-1025-bound-cores/4.phy")).expect("restore the hash-verified local pallet .phy before running native recursive validation");
  let pallet=l4d2_formats::phy::parse_phy(&phy).unwrap();let hex=data["box"].as_str().unwrap();let raw=(0..hex.len()).step_by(2).map(|i|u8::from_str_radix(&hex[i..i+2],16).unwrap()).collect::<Vec<_>>();let mut packet=(raw.len() as u32).to_le_bytes().to_vec();packet.extend(raw);let boxes=l4d2_formats::phy::parse_collision(&packet,1).unwrap();
  let w=|v:&serde_json::Value|v.as_u64().unwrap() as u32;let f=|v:&serde_json::Value|f32::from_bits(w(v));let mut calls=0;let mut total=0;
  for c in data["cases"].as_array().unwrap(){
@@ -25,6 +53,7 @@ fn recursive_split_requests_child_hierarchies_and_counter_teardown_match_native(
     let own=Arc::new(AtomicI32::new(0));let mut descendants=Contacts::new([0,1],[&solids[0],&solids[1]]).unwrap();descendants.listeners.push(own.clone());
     let mut parent=Entry{key:Pair{slots:[0,1],ledges:std::array::from_fn(|j|w(&c["ledges"][j]) as usize)},contact:Contact::new([0,1],crate::ivp_mindist_graph::COMPACT_PAIR_FLAGS,input.bodies[0].margin+input.bodies[1].margin).unwrap(),recursive:Some(Box::new(Recursive{split:None,count:own,descendants}))};
     let scene=Scene{frames,input,root:Arc::new(AtomicI32::new(c["initial_count"].as_i64().unwrap() as i32)),limit:c["limit"].as_i64().unwrap() as i32,fallback:f(&data["fallback_bits"]),margin:input.bodies[0].margin+input.bodies[1].margin,frame};
+    staged_replay(&parent,&scene,c,false);
     let result=parent.expand(input,&scene.root,scene.limit,scene.fallback,|k,e,c|initialize(k,e,c,&scene),retire).unwrap_or_else(|e|panic!("case{}: {e}",c["id"]));
     let recursive=parent.recursive.as_ref().unwrap();assert_eq!(recursive.split.map_or(-1,|n|n as i32),c["split"].as_i64().unwrap() as i32,"case{} split",c["id"]);
     assert_eq!(result.is_some(),c["calls"]==1);
@@ -37,8 +66,8 @@ fn recursive_split_requests_child_hierarchies_and_counter_teardown_match_native(
 #[test]
 fn feature_directed_recursive_contact_routes_and_children_match_native(){
  let data:serde_json::Value=serde_json::from_str(include_str!("../tools/fixtures/native-ivp-recursive-failure.json")).unwrap();
- // Local research fixture (not in the repository); skipped when absent.
- let Ok(phy)=std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"),"/local-research/parity/ivp-bounds-1025-bound-cores/4.phy")) else {eprintln!("skipped: local pallet .phy fixture missing");return;};
+ // Retail geometry stays local; missing evidence must fail this validation.
+ let phy=std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"),"/local-research/parity/ivp-bounds-1025-bound-cores/4.phy")).expect("restore the hash-verified local pallet .phy before running native recursive validation");
  let pallet=l4d2_formats::phy::parse_phy(&phy).unwrap();let hex=data["box"].as_str().unwrap();let raw=(0..hex.len()).step_by(2).map(|i|u8::from_str_radix(&hex[i..i+2],16).unwrap()).collect::<Vec<_>>();let mut packet=(raw.len() as u32).to_le_bytes().to_vec();packet.extend(raw);let boxes=l4d2_formats::phy::parse_collision(&packet,1).unwrap();
  let w=|v:&serde_json::Value|v.as_u64().unwrap() as u32;let f=|v:&serde_json::Value|f32::from_bits(w(v));let mut calls=0;let mut total=0;
  for c in data["cases"].as_array().unwrap(){
@@ -51,6 +80,7 @@ fn feature_directed_recursive_contact_routes_and_children_match_native(){
     let mut parent=Entry{key:Pair{slots:[0,1],ledges:std::array::from_fn(|j|w(&c["ledges"][j]) as usize)},contact:Contact::new([0,1],crate::ivp_mindist_graph::COMPACT_PAIR_FLAGS,input.bodies[0].margin+input.bodies[1].margin).unwrap(),recursive:Some(Box::new(Recursive{split:None,count:own,descendants}))};
     let scene=Scene{frames,input,root:Arc::new(AtomicI32::new(c["initial_count"].as_i64().unwrap() as i32)),limit:c["limit"].as_i64().unwrap() as i32,fallback:f(&data["fallback_bits"]),margin:input.bodies[0].margin+input.bodies[1].margin,frame};
     parent.contact.query.kinds=std::array::from_fn(|j|c["input_kinds"][j].as_i64().unwrap() as i16);let physical_calls=std::cell::Cell::new(0);
+    staged_replay(&parent,&scene,c,true);
     let result=parent.dispatch_contact(input,&scene.root,scene.limit,scene.fallback,|_|{physical_calls.set(physical_calls.get()+1);Ok(())},|k,e,c|initialize(k,e,c,&scene),retire).unwrap_or_else(|e|panic!("case{}: {e}",c["id"]));assert_eq!(physical_calls.get(),w(&c["physical_calls"]),"case{} physical handoff",c["id"]);
     let recursive=parent.recursive.as_ref().unwrap();assert_eq!(recursive.split.map_or(-1,|n|n as i32),c["split"].as_i64().unwrap() as i32,"case{} split",c["id"]);
     assert_eq!(matches!(result,ContactOutcome::Expanded(_)),c["calls"]==1);

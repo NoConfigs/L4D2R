@@ -2,6 +2,9 @@
 //! updates. Unit flags, group decay and pending commit remain caller stages.
 use bevy::prelude::*;
 use crate::ivp_contact::Core;
+///100f9770 rebuilds the environment's pair-work decay after a timestep change.
+/// The base is the owned single-precision0.9 constant promoted to double.
+pub(crate) fn decay_for_timestep(dt:f32)->f32{(f32::from_bits(0x3f666666) as f64).powf(dt as f64) as f32}
 #[derive(Clone,Copy)]
 pub(crate) struct Body {pub flags:u16,pub mass:f32,pub inertia:Vec3,pub rotation:Mat3,pub core:Core}
 #[derive(Clone,Copy)]
@@ -73,6 +76,12 @@ pub(crate) fn dissipate(bodies:&mut [Body;2],requested:f32,k:&Settings)->Result<
 #[cfg(test)]
 mod tests {
     use super::*;use serde_json::Value;
+    #[test]
+    fn public_timestep_rebuilds_native_pair_work_decay(){
+        let data:Value=serde_json::from_str(include_str!("../tools/fixtures/native-ivp-timestep-decay.json")).unwrap();
+        let cases=data["cases"].as_array().unwrap();assert_eq!(cases.len(),256);
+        for (id,c) in cases.iter().enumerate(){let dt=f32::from_bits(c["dt"].as_u64().unwrap() as u32);assert_eq!(c["dt"],c["stored_dt"]);assert_eq!(dt.recip().to_bits(),c["inverse"].as_u64().unwrap() as u32,"case{id} inverse");assert_eq!(decay_for_timestep(dt).to_bits(),c["decay"].as_u64().unwrap() as u32,"case{id} decay");}
+    }
     fn f(v:&Value)->f32{v.as_f64().unwrap() as f32}
     fn v(a:&Value)->Vec3{Vec3::from_array(std::array::from_fn(|i|f(&a[i])))}
     fn bodies(a:&Value)->[Body;2]{std::array::from_fn(|i|{let b=&a[i];Body{flags:b["flags"].as_u64().unwrap() as u16,mass:f(&b["mass"]),inertia:v(&b["inertia"]),rotation:Mat3::from_cols_array(&std::array::from_fn(|i|f(&b["rotation_rows"][i]))).transpose(),core:Core{inverse_mass:f(&b["inverse_mass"]),inverse_inertia:v(&b["inverse_inertia"]),linear:v(&b["linear"]),angular:v(&b["angular"]),pending_linear:v(&b["pending_linear"]),pending_angular:v(&b["pending_angular"])}}})}
