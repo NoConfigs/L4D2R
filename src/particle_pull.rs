@@ -40,6 +40,9 @@ pub struct ParticlePull {
     /// SpriteCard $DEPTHBLEND fade distance in metres (0 when off).
     #[uniform(109)]
     pub depth_blend: f32,
+    /// 3D-skybox copies: the sky_camera fog colour (effects.y 3).
+    #[uniform(110)]
+    pub sky_fog: Vec4,
     /// SpriteCard $MOD2X: the sprite multiplies the scene by twice its
     /// colour (mid-grey leaves it unchanged), e.g. fire glows.
     pub mod2x: bool,
@@ -194,6 +197,18 @@ impl ParticleVertices {
         colors: &[[f32; 4]],
         animation: Option<(&[[f32; 2]], &[[f32; 3]], &[[f32; 4]])>,
     ) -> Option<(Handle<Mesh>, u32)> {
+        self.push_fogged(positions, uv, colors, animation, &[])
+    }
+    /// As `push_animated`, with a per-vertex 3D-skybox fog amount in
+    /// blend.w (empty: none).
+    pub fn push_fogged(
+        &mut self,
+        positions: &[[f32; 3]],
+        uv: &[[f32; 2]],
+        colors: &[[f32; 4]],
+        animation: Option<(&[[f32; 2]], &[[f32; 3]], &[[f32; 4]])>,
+        fog: &[f32],
+    ) -> Option<(Handle<Mesh>, u32)> {
         let quads = (positions.len() / 4).min(1 << MAX_QUAD_BITS);
         if quads == 0 {
             return None;
@@ -216,7 +231,7 @@ impl ParticleVertices {
             );
             for v in [
                 p[0], p[1], p[2], 0., t[0], t[1], next[0], next[1], c[0], c[1], c[2], c[3],
-                blend[0], blend[1], blend[2], 0., second[0], second[1], second[2], second[3],
+                blend[0], blend[1], blend[2], fog.get(i).copied().unwrap_or(0.), second[0], second[1], second[2], second[3],
             ] {
                 self.bytes.extend_from_slice(&f32::to_le_bytes(v));
             }

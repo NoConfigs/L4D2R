@@ -9,12 +9,15 @@ pub struct BotFlashlight(pub usize);
 
 /// Retail draws other survivors' flashlights from the held weapon:
 /// roughly chest height (m) and this far in front of the body.
-/// Flashlight beam, matched to retail captures in the c1m1 stairwell corridor
-/// (local-research/parity/flash-1030): the lit spot reads about 12 degrees
-/// either side of the aim and peaks near 150/255 under the map's exposure.
+/// Flashlight beam. Peak brightness from the c1m1 stairwell corridor
+/// (local-research/parity/flash-1030, about 150/255). The cone from a
+/// matched live retail shot on c1m2's store floor (19 Nov, setpos -6960
+/// -2400 392, setang 30 108 0): full brightness to about 10 degrees off the
+/// aim, fading through 14-17 and gone by about 22 (retail's flashlight
+/// texture over its 53-degree r_flashlightfov); 3..16 lit only half of it.
 pub const LUMENS: f32 = 200.;
-pub const INNER_ANGLE: f32 = 3.;
-pub const OUTER_ANGLE: f32 = 16.;
+pub const INNER_ANGLE: f32 = 6.;
+pub const OUTER_ANGLE: f32 = 22.;
 const GUN_HEIGHT: f32 = 1.35;
 const GUN_FORWARD: f32 = 0.4;
 

@@ -125,6 +125,12 @@ pub fn update(
         ) {
             return None;
         }
+        // SF_CHANGELEVEL_NOTOUCH (2): the start saferoom's volume back to
+        // the previous chapter only marks the transition area (c2m4's
+        // c2m3_c2m4_changelevel sent a fresh start straight back to c2m3).
+        if e.me.kv("spawnflags").and_then(|v| v.trim().parse::<i64>().ok()).is_some_and(|f| f & 2 != 0) {
+            return None;
+        }
         let name = e.me.kv("map")?;
         if name.eq_ignore_ascii_case(&current)
             || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')

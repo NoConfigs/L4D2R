@@ -51,6 +51,11 @@ fn triangles(indices: &[usize], flags: u8) -> io::Result<Vec<[usize; 3]>> {
                 }
             })
             .collect())
+    } else if indices.len() % 3 == 0 {
+        // No strip flag: Source draws anything that is not a tristrip as a
+        // list (c8m1's models/props_doors/doordm01_01 has flags 0; the map
+        // failed to load).
+        Ok(indices.chunks_exact(3).map(|v| [v[0], v[1], v[2]]).collect())
     } else {
         Err(invalid("Unknown VTX strip topology"))
     }
@@ -84,7 +89,7 @@ pub fn load_lod(
     let base = path.trim_end_matches(".mdl");
     let vvd = assets.read(&format!("{base}.vvd"))?;
     let vtx = assets.read(&format!("{base}.dx90.vtx"))?;
-    parse(assets, &mdl, &vvd, &vtx, skin, body, lod)
+    parse(assets, &mdl, &vvd, &vtx, skin, body, lod).map_err(|e| io::Error::new(e.kind(), format!("{path}: {e}")))
 }
 /// Muzzle direction in the same bind-space coordinates as the loaded VVD mesh.
 pub fn muzzle_forward(assets: &mut SourceAssets, path: &str) -> io::Result<[f32; 3]> {
@@ -140,7 +145,9 @@ fn parse(
     requested_lod: usize,
 ) -> io::Result<Vec<ModelMesh>> {
     if range(mdl, 0, 4)? != b"IDST"
-        || !matches!(u32_at(mdl, 4)?, 48 | 49)
+        // 44-47: older studio headers whose body part/model/mesh/texture
+        // tables match 48 (c13m1's militiawindow02_breakable_chunk_01 is 44).
+        || !matches!(u32_at(mdl, 4)?, 44..=49)
         || range(vvd, 0, 4)? != b"IDSV"
         || u32_at(vvd, 4)? != 4
         || u32_at(vtx, 0)? != 7
@@ -439,6 +446,26 @@ mod tests {
 }
 #[cfg(test)]
 mod cabinet_pose_tests {
+    /// c8m1 and c13m1 failed to load on these two (flags-0 strips, a v44 MDL).
+    #[test]
+    fn dlc_models_with_unflagged_strips_and_old_headers_load() {
+        let root = std::path::Path::new(r"C:\Program Files (x86)\Steam\steamapps\common\Left 4 Dead 2");
+        if !root.exists() {
+            return;
+        }
+        let mut assets = crate::source_assets::SourceAssets::new(root, vec![]).unwrap();
+        for path in [
+            "models/props_doors/doordm01_01.mdl",
+            "models/props/cs_militia/militiawindow02_breakable_chunk_01.mdl",
+        ] {
+            let meshes = super::load(&mut assets, path, 0, 0).unwrap();
+            let triangles: usize = meshes.iter().map(|m| m.positions.len() / 3).sum();
+            assert!(triangles > 0, "{path}");
+            for m in &meshes {
+                assert!(m.positions.iter().flatten().all(|v| v.is_finite() && v.abs() < 1e4), "{path}");
+            }
+        }
+    }
     #[test]
     fn medical_cabinet_hangs_flat_on_the_wall_in_its_idle_pose() {
         let root = std::path::Path::new(r"C:\Program Files (x86)\Steam\steamapps\common\Left 4 Dead 2");

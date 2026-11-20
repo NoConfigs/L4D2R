@@ -12,10 +12,27 @@ pub struct Material {
     /// BLENDMODULATETEXTURE), giving hard-edged grime and dirt patches.
     pub blend_modulate: Option<String>,
     pub normal: Option<String>,
+    /// LightmappedGeneric/WorldVertexTransition `$bumpmap` (a normal map or,
+    /// with `$ssbump`, basis weights) for the bumped-lightmap path; kept
+    /// apart from `normal`, which Bevy's normal mapping would also use.
+    pub bump: Option<String>,
     pub palette: Option<(String, usize, usize)>,
     pub color: [f32; 4],
     pub alpha: u8,
     pub cutoff: f32,
+    /// Valve's fence render state (AlphaTest + Translucent with
+    /// $allowfencerenderstatehack, and translucent chainlink): texels under
+    /// `cutoff` are discarded and depth is written, but the survivors are
+    /// alpha blended, so wire edges stay see-through. A hard cutout drew
+    /// c1m2's fence002 wires thick and near-black (retail comparison 19 Nov).
+    pub fence: bool,
+    /// `$halflambert`: direct light wraps around as (N.L x 0.5 + 0.5)^2
+    /// (view-model weapons, many props), so surfaces facing away from the
+    /// sun still catch some of it.
+    pub half_lambert: bool,
+    /// `$ssbump`: the bump map is a self-shadowing basis-weight map, not a
+    /// normal map.
+    pub ssbump: bool,
     pub nocull: bool,
     pub unlit: bool,
     pub uv: [f32; 7],
@@ -55,7 +72,8 @@ impl EnvmapSettings {
         // World surfaces only. Model envmaps (VertexLitGeneric) are masked
         // and dimmed by $envmapmask, normal-map alpha and the Phong path in
         // retail; drawn unmasked they turned props and guns gold/chrome.
-        if !matches!(shader, "lightmappedgeneric" | "worldvertextransition") {
+        // L4D2R_NO_ENVMAP: debug, world envmaps off.
+        if !matches!(shader, "lightmappedgeneric" | "worldvertextransition") || std::env::var_os("L4D2R_NO_ENVMAP").is_some() {
             return None;
         }
         let name = v.get("$envmap")?.trim().to_ascii_lowercase().replace('\\', "/");
@@ -94,19 +112,42 @@ impl EnvmapSettings {
 pub struct CapPhongSettings {
     pub params: [f32; 4], // explicit exponent, diffuse exponent, boost, enabled
     pub fresnel: [f32; 4],
-    pub controls: [f32; 4], // base alpha mask, base luminance mask
+    /// base alpha mask, base luminance mask, half-Lambert, exponent texture
+    pub controls: [f32; 4],
+    /// $phongtint RGB; w: $phongalbedotint
     pub tint: [f32; 4],
+    /// $phongexponenttexture (linear): R exponent (1 + 149 R), G albedo-tint
+    /// amount. Bound in the bump-map slot, which models do not use.
+    pub exponent_texture: Option<String>,
+    /// `$lightwarptexture`: the diffuse term is 2 x this ramp at the
+    /// half-Lambert N.L * 0.5 + 0.5, read linear (the survivor head ramps end
+    /// at 127: 2 x 127/255 = Lambert's 1 at full light). Bound in the
+    /// emission slot (fresnel.w).
+    pub lightwarp: Option<String>,
 }
 impl CapPhongSettings {
     fn parse(name: &str, shader: &str, v: &BTreeMap<String, String>) -> Option<Self> {
-        if shader != "vertexlitgeneric" || !name.replace('\\', "/").to_lowercase().contains("/body_wounds/")
+        // Any VertexLitGeneric $phong material in the reconstructed permutation
+        // (wound caps and gibs first; view-model weapons and survivors use the
+        // same phong_ps30 path).
+        let _ = name;
+        if shader != "vertexlitgeneric"
             || !v.get("$phong").is_some_and(|s| s == "1") { return None; }
         // Do not quietly treat unimplemented permutations as the ordinary cap
         // shader. The shipped cap/gib materials provide numeric exponents.
-        if ["$phongexponenttexture", "$phongwarptexture", "$lightwarptexture", "$envmap", "$detail"]
+        // $envmap is accepted but not drawn on models (EnvmapSettings is
+        // world-only); the exponent texture and albedo tint are the skin
+        // shader's: exponent 1 + 149 R, tint lerp(1, albedo, G).
+        if ["$phongwarptexture", "$detail"]
             .iter().any(|key| v.contains_key(*key))
-            || ["$rimlight", "$phongalbedotint", "$shinyblood"].iter().any(|key| v.get(*key).is_some_and(|s| s == "1")) { return None; }
-        let exponent = v.get("$phongexponent")?.parse::<f32>().ok().filter(|v| v.is_finite() && *v > 0.)?;
+            || ["$rimlight", "$shinyblood"].iter().any(|key| v.get(*key).is_some_and(|s| s == "1")) { return None; }
+        let exponent_texture = texture_path(v.get("$phongexponenttexture"));
+        // An explicit $phongexponent overrides the texture's.
+        let exponent = match v.get("$phongexponent").and_then(|s| s.parse::<f32>().ok()).filter(|v| v.is_finite() && *v > 0.) {
+            Some(e) => e,
+            None if exponent_texture.is_some() => -1.,
+            None => return None,
+        };
         let number = |key: &str, fallback: f32| v.get(key).and_then(|s| s.parse::<f32>().ok()).filter(|v| v.is_finite()).unwrap_or(fallback);
         let vector = |key: &str, mut fallback: [f32; 3]| {
             if let Some(s) = v.get(key) {
@@ -118,10 +159,24 @@ impl CapPhongSettings {
         };
         let f = vector("$phongfresnelranges", [0., 0.5, 1.]);
         let tint = vector("$phongtint", [1.; 3]);
+        // A light warp needs the emission slot; self-illuminated materials
+        // keep the old path.
+        let lightwarp = texture_path(v.get("$lightwarptexture"));
+        if lightwarp.is_some() && v.get("$selfillum").is_some_and(|s| s == "1") {
+            return None;
+        }
         Some(Self { params: [exponent, number("$diffuseexp", 1.).max(0.0001), number("$phongboost", 1.).max(0.), 1.],
-            fresnel: [f[0], f[1], f[2], 0.],
-            controls: [number("$basemapalphaphongmask", 0.).clamp(0., 1.), number("$basemapluminancephongmask", 0.).clamp(0., 1.), 0., 0.],
-            tint: [tint[0], tint[1], tint[2], 0.] })
+            fresnel: [f[0], f[1], f[2], if lightwarp.is_some() { 1. } else { 0. }],
+            controls: [
+                number("$basemapalphaphongmask", 0.).clamp(0., 1.),
+                number("$basemapluminancephongmask", 0.).clamp(0., 1.),
+                // z: $halflambert in the phong diffuse.
+                if v.get("$halflambert").is_some_and(|s| s == "1") { 1. } else { 0. },
+                // w: exponent texture bound (bump-map slot).
+                if exponent_texture.is_some() { 1. } else { 0. },
+            ],
+            tint: [tint[0], tint[1], tint[2], if v.get("$phongalbedotint").is_some_and(|s| s == "1") { 1. } else { 0. }],
+            exponent_texture, lightwarp })
     }
 }
 /// Infected's authored Phong controls; these are not a PBR roughness value.
@@ -218,6 +273,9 @@ pub struct WaterSettings {
     pub above: bool,
     pub force_cheap: bool,
     pub force_expensive: bool,
+    /// `$lightmapwaterfog`: the fog colour is lit by the water surface's own
+    /// lightmap (c4m1's sunlit river reads brown, not flat fog colour).
+    pub lightmap_fog: bool,
     pub envmap: Option<String>,
     pub bottom: Option<String>,
     pub normal_scale: f32,
@@ -264,6 +322,7 @@ impl WaterSettings {
             reflect: v.contains_key("$reflecttexture") || v.contains_key("$envmap"),
             refract: number("$refract", 1.) != 0., above: number("$abovewater", 1.) != 0.,
             force_cheap: number("$forcecheap", 0.) != 0., force_expensive: number("$forceexpensive", 0.) != 0.,
+            lightmap_fog: number("$lightmapwaterfog", 0.) != 0.,
             envmap: v.get("$envmap").cloned(), bottom: v.get("$bottommaterial").cloned(),
             normal_scale: number("$flow_normaluvscale", 180.).max(0.001),
             world_scale: number("$flow_worlduvscale", 1.).max(0.001),
@@ -357,6 +416,29 @@ fn values(
                 subsection = t[i].to_lowercase();
             }
             i += 1;
+        }
+    }
+    // Shader-quality conditionals ("GPU>=2?$phong"): Source evaluates them
+    // against the machine's gpu_level, 2 on a PC at high settings. A met
+    // condition overrides the unconditional key; others are dropped.
+    const GPU_LEVEL: i32 = 2;
+    let conditional: Vec<(String, String)> = map
+        .iter()
+        .filter(|(k, _)| k.contains('?'))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    for (key, value) in conditional {
+        map.remove(&key);
+        let Some((condition, name)) = key.split_once('?') else { continue };
+        let met = if let Some(n) = condition.strip_prefix("gpu>=") {
+            n.trim().parse::<i32>().is_ok_and(|n| GPU_LEVEL >= n)
+        } else if let Some(n) = condition.strip_prefix("gpu<") {
+            n.trim().parse::<i32>().is_ok_and(|n| GPU_LEVEL < n)
+        } else {
+            false
+        };
+        if met {
+            map.insert(name.to_string(), value);
         }
     }
     if shader == "patch" {
@@ -469,6 +551,20 @@ pub fn particle_mod2x(assets: &mut SourceAssets, material: &str) -> io::Result<b
     let (shader, values) = values(assets, &material_path(material), 0)?;
     Ok(shader.eq_ignore_ascii_case("spritecard") && values.get("$mod2x").is_some_and(|value| value == "1"))
 }
+/// Particle fog, as ParticlePull `effects.y`: 0 none ($nofog), 1 the world's
+/// pixel fog, 2 vertex fog only. SpriteCard fogs per vertex
+/// ($vertexfogamount), which Source's HDR pass does not apply: in a live
+/// retail c1m1 comparison (19 Nov) the rooftop smoke column took no colour
+/// from a forced red fog_override, where world brushes went fully red. The
+/// 3D-skybox path still applies the sky_camera fog to vertex-fogged sprites.
+pub fn particle_fog_mode(assets: &mut SourceAssets, material: &str) -> io::Result<f32> {
+    let (shader, _) = values(assets, &material_path(material), 0)?;
+    Ok(match (particle_fog_enabled(assets, material)?, shader.eq_ignore_ascii_case("spritecard")) {
+        (false, _) => 0.,
+        (true, true) => 2.,
+        (true, false) => 1.,
+    })
+}
 pub fn particle_fog_enabled(assets: &mut SourceAssets, material: &str) -> io::Result<bool> {
     let (_, values) = values(assets, &material_path(material), 0)?;
     Ok(values.get("$nofog").is_none_or(|value| value != "1"))
@@ -529,16 +625,19 @@ pub fn load(assets: &mut SourceAssets, name: &str) -> io::Result<Material> {
     let mut color = [1.; 4];
     if let Some(c) = v.get("$color2").or_else(|| v.get("$color")) {
         let scale = if c.contains('{') { 1. / 255. } else { 1. };
-        for (out, part) in color[..3]
-            .iter_mut()
-            .zip(c.trim_matches(['[', ']', '{', '}']).split_whitespace())
-        {
-            *out = part
-                .parse::<f32>()
-                .ok()
-                .filter(|v| v.is_finite())
-                .unwrap_or(1.)
-                * scale;
+        let parts: Vec<f32> = c
+            .trim_matches(['[', ']', '{', '}', ' '])
+            .split_whitespace()
+            .map(|part| part.parse::<f32>().ok().filter(|v| v.is_finite()).unwrap_or(1.) * scale)
+            .collect();
+        // A single value applies to all three channels.
+        match parts.as_slice() {
+            [x] => color[..3].copy_from_slice(&[*x; 3]),
+            _ => {
+                for (out, v) in color[..3].iter_mut().zip(parts) {
+                    *out = v;
+                }
+            }
         }
     }
     color[3] = v
@@ -588,6 +687,9 @@ pub fn load(assets: &mut SourceAssets, name: &str) -> io::Result<Material> {
                 .or_else(|| v.get("$basetexture"))
                 .or_else(|| v.get("$iris")),
         ),
+        bump: matches!(shader.as_str(), "lightmappedgeneric" | "worldvertextransition")
+            .then(|| texture_path(v.get("$bumpmap")))
+            .flatten(),
         // Source's self-shadowed bump coefficients are not XYZ tangent normals.
         normal: if yes("$ssbump") {
             None
@@ -614,8 +716,13 @@ pub fn load(assets: &mut SourceAssets, name: &str) -> io::Result<Material> {
         emission_tint: {
             let mut tint=[1.;3];
             if let Some(value)=v.get("$selfillumtint") {
-                for (out,value) in tint.iter_mut().zip(value.trim_matches(|c|c=='['||c==']'||c=='{'||c=='}').split_whitespace()) {
-                    *out=value.parse::<f32>().ok().filter(|v|v.is_finite()).unwrap_or(1.).max(0.);
+                let parts:Vec<f32>=value.trim_matches(|c|c=='['||c==']'||c=='{'||c=='}'||c==' ').split_whitespace()
+                    .map(|v|v.parse::<f32>().ok().filter(|v|v.is_finite()).unwrap_or(1.).max(0.)).collect();
+                // One value applies to all channels (c11m1's greenhouse
+                // glass ".015" drew (0.015, 1, 1): bright cyan skylights).
+                match parts.as_slice() {
+                    [x] => tint=[*x;3],
+                    _ => for (out,v) in tint.iter_mut().zip(parts) { *out=v; },
                 }
             }
             tint
@@ -634,6 +741,9 @@ pub fn load(assets: &mut SourceAssets, name: &str) -> io::Result<Material> {
         // no texture to sample they rendered plain white against the sky.
         color: if shader == "black" { [0., 0., 0., color[3]] } else { color },
         alpha,
+        fence: alpha == 1 && (fence_depth || (yes("$translucent") && chainlink)),
+        half_lambert: yes("$halflambert"),
+        ssbump: yes("$ssbump"),
         cutoff: v
             .get("$alphatestreference")
             .and_then(|s| s.parse::<f32>().ok())
@@ -677,9 +787,13 @@ impl Default for Material {
             base: None,
             base2: None,
             normal: None,
+            bump: None,
             palette: None,
             color: [1., 0., 1., 1.],
             alpha: 0,
+            fence: false,
+            half_lambert: false,
+            ssbump: false,
             cutoff: 0.5,
             nocull: true,
             unlit: false,
@@ -817,7 +931,7 @@ mod tests {
             $abovewater 1 $reflecttexture _rt_WaterReflection $reflectamount 0.4
             $refract 1 $refractamount 0.25 $refracttint "{151 135 34}"
             $flow_normaluvscale 180 $flow_timeintervalinseconds 0.5
-            $fogstart 0 $fogend 30
+            $fogstart 0 $fogend 30 $lightmapwaterfog 1
             ">=DX90_20b" { $fogcolor "{9 7 1}" }
             "<DX90_20b" { $fogcolor "{255 0 0}" }
         }"#).unwrap();
@@ -826,6 +940,7 @@ mod tests {
         let w = material.water.unwrap();
         assert!(material.base.is_none());
         assert_eq!(w.textures().count(), 3);
+        assert!(w.lightmap_fog, "$lightmapwaterfog");
         assert!(w.fog_color.iter().zip([9./255., 7./255., 1./255.]).all(|(a,b)| (*a-b).abs() < 1e-7));
         assert!(w.refract_tint.iter().zip([151./255., 135./255., 34./255.]).all(|(a,b)| (*a-b).abs() < 1e-7));
         assert_eq!((w.fog_start, w.fog_end, w.interval), (0.,30.,0.5));
@@ -863,6 +978,17 @@ mod tests {
         let m=load(&mut assets,"glow").unwrap();assert_eq!(m.emission.as_deref(),Some("materials/lamps/base.vtf"));assert_eq!(m.emission_mask.as_deref(),Some("materials/lamps/mask.vtf"));assert_eq!(m.emission_tint,[0.5,1.,2.]);assert_eq!(m.alpha,0);
     }
     #[test]
+    fn a_single_selfillumtint_value_applies_to_every_channel() {
+        use std::io::{Cursor,Write};
+        let mut zip=zip::ZipWriter::new(Cursor::new(vec![]));
+        zip.start_file("materials/glass.vmt",zip::write::SimpleFileOptions::default()).unwrap();
+        zip.write_all(br#"LightmappedGeneric {$basetexture glass/g $selfillum 1 $selfillumtint ".015" $color "[.5]"}"#).unwrap();
+        let mut assets=SourceAssets::new(std::path::Path::new("target/nonexistent-material-test"),zip.finish().unwrap().into_inner()).unwrap();
+        let m=load(&mut assets,"glass").unwrap();
+        assert_eq!(m.emission_tint,[0.015;3]);
+        assert_eq!(&m.color[..3],&[0.5;3]);
+    }
+    #[test]
     fn owned_exit_and_lighting_materials_retain_their_native_selfillum() {
         let root=std::path::Path::new(r"C:\Program Files (x86)\Steam\steamapps\common\Left 4 Dead 2");if !root.exists(){return;}
         let mut assets=SourceAssets::new(root,vec![]).unwrap();let mut count=0;
@@ -887,9 +1013,22 @@ mod tests {
         ] {
             let material = load(&mut assets, name).unwrap();
             assert_eq!(material.alpha, 1);
+            assert!(material.fence, "{name}: fence render state");
             assert!(material.nocull);
             assert!((material.cutoff - 0.3).abs() < 0.00001);
         }
+    }
+    #[test]
+    fn view_model_pistol_and_survivor_skin_read_half_lambert() {
+        let root =
+            std::path::Path::new(r"C:\Program Files (x86)\Steam\steamapps\common\Left 4 Dead 2");
+        if !root.exists() {
+            return;
+        }
+        let mut assets = SourceAssets::new(root, vec![]).unwrap();
+        assert!(load(&mut assets, "models/v_models/weapons/pistol/v_pistol_reference").unwrap().half_lambert);
+        // Explicit "$halflambert 0" stays off.
+        assert!(!load(&mut assets, "models/survivors/gambler/gambler_body").unwrap().half_lambert);
     }
     #[test]
     fn owned_chainlink_cutout_retains_two_sided_rendering() {

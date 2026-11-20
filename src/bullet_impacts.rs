@@ -46,6 +46,9 @@ pub struct Impacts {
     modulate: Option<Handle<StandardMaterial>>,
     /// Game material character -> the Impact group's decals (empty: none).
     decals: std::collections::HashMap<u8, Vec<Decal>>,
+    /// The "Blood" group (UTIL_BloodDecalTrace for red blood): DecalModulate
+    /// splats from decals_mod2x.
+    blood_decals: Vec<Decal>,
     seed: u32,
     blood_clock: Vec<(usize, f32)>,
     cursor: usize,
@@ -80,38 +83,54 @@ pub fn impact_table(
     for (key, group) in &translation.values {
         // The KeyValues reader lowercases keys; game materials are uppercase.
         let Some(code) = key.as_bytes().first().map(u8::to_ascii_uppercase) else { continue };
-        let mut decals = vec![];
-        if let Some(entries) = root.children.get(&group.to_ascii_lowercase()) {
-            for name in entries.values.keys() {
-                let Some(text) = vmt(name) else { continue };
-                let block = crate::kv::blocks(&text);
-                let Some(body) = block.children.values().next() else { continue };
-                let get = |k: &str| body.values.get(k).map(|v| v.trim().to_string());
-                let pair = |k: &str| -> Option<Vec2> {
-                    let v: Vec<f32> = get(k)?.split_whitespace().filter_map(|x| x.parse().ok()).collect();
-                    (v.len() == 2).then(|| Vec2::new(v[0], v[1]))
-                };
-                let (Some(material), Some(pos), Some(size)) = (get("$material"), pair("$pos"), pair("$size")) else {
-                    continue;
-                };
-                if size.x <= 0. || size.y <= 0. {
-                    continue;
-                }
-                let material = material.replace('\\', "/").to_ascii_lowercase();
-                let Some((w, h)) = atlas(&material) else { continue };
-                let scale: f32 = get("$decalscale").and_then(|v| v.parse().ok()).unwrap_or(1.);
-                let variation = get("$decalscalevariation").and_then(|v| v.parse().ok()).unwrap_or(0.);
-                decals.push(Decal {
-                    uv: [pos.x / w as f32, pos.y / h as f32, (pos.x + size.x) / w as f32, (pos.y + size.y) / h as f32],
-                    size: size * scale * crate::collision::UNIT,
-                    variation,
-                    modulate: material.ends_with("mod2x"),
-                });
-            }
-        }
-        table.insert(code, decals);
+        table.insert(code, group_decals(&root, group, &mut vmt, &mut atlas));
     }
     table
+}
+/// One named decal group of decals_subrect.txt (e.g. "Blood").
+pub fn named_group(
+    script: &str,
+    group: &str,
+    mut vmt: impl FnMut(&str) -> Option<String>,
+    mut atlas: impl FnMut(&str) -> Option<(u32, u32)>,
+) -> Vec<Decal> {
+    group_decals(&crate::kv::blocks(script), group, &mut vmt, &mut atlas)
+}
+fn group_decals(
+    root: &crate::kv::Block,
+    group: &str,
+    vmt: &mut dyn FnMut(&str) -> Option<String>,
+    atlas: &mut dyn FnMut(&str) -> Option<(u32, u32)>,
+) -> Vec<Decal> {
+    let mut decals = vec![];
+    let Some(entries) = root.children.get(&group.to_ascii_lowercase()) else { return decals };
+    for name in entries.values.keys() {
+        let Some(text) = vmt(name) else { continue };
+        let block = crate::kv::blocks(&text);
+        let Some(body) = block.children.values().next() else { continue };
+        let get = |k: &str| body.values.get(k).map(|v| v.trim().to_string());
+        let pair = |k: &str| -> Option<Vec2> {
+            let v: Vec<f32> = get(k)?.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+            (v.len() == 2).then(|| Vec2::new(v[0], v[1]))
+        };
+        let (Some(material), Some(pos), Some(size)) = (get("$material"), pair("$pos"), pair("$size")) else {
+            continue;
+        };
+        if size.x <= 0. || size.y <= 0. {
+            continue;
+        }
+        let material = material.replace('\\', "/").to_ascii_lowercase();
+        let Some((w, h)) = atlas(&material) else { continue };
+        let scale: f32 = get("$decalscale").and_then(|v| v.parse().ok()).unwrap_or(1.);
+        let variation = get("$decalscalevariation").and_then(|v| v.parse().ok()).unwrap_or(0.);
+        decals.push(Decal {
+            uv: [pos.x / w as f32, pos.y / h as f32, (pos.x + size.x) / w as f32, (pos.y + size.y) / h as f32],
+            size: size * scale * crate::collision::UNIT,
+            variation,
+            modulate: material.ends_with("mod2x"),
+        });
+    }
+    decals
 }
 pub fn prepare(world: &mut EntityWorld) {
     for slot in 0..BLOOD_POOL {
@@ -225,14 +244,12 @@ pub fn setup(
             .ok()
             .map(|b| String::from_utf8_lossy(&b).into_owned())
         {
-            data.decals = impact_table(
-                &script,
-                |name| {
-                    let path = format!("materials/{}.vmt", name.replace('\\', "/").to_ascii_lowercase());
-                    assets.read(&path).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
-                },
-                |material| sizes.get(material).copied(),
-            );
+            let mut vmt = |name: &str| {
+                let path = format!("materials/{}.vmt", name.replace('\\', "/").to_ascii_lowercase());
+                assets.read(&path).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
+            };
+            data.decals = impact_table(&script, &mut vmt, |material| sizes.get(material).copied());
+            data.blood_decals = named_group(&script, "Blood", &mut vmt, |material| sizes.get(material).copied());
         }
         if data.decals.values().all(|d| d.is_empty()) {
             eprintln!("Bullet decals: scripts/decals_subrect.txt gave no impact decals");
@@ -341,11 +358,7 @@ fn bullet_hole(
     if choices.is_empty() {
         return;
     }
-    data.seed = data.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-    let pick = choices[(data.seed >> 8) as usize % choices.len()];
-    data.seed = data.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-    let r = ((data.seed >> 8) & 0xffff) as f32 / 65535. * 2. - 1.;
-    let size = pick.size * (1. + pick.variation * r);
+    let (pick, size) = pick(data, &choices);
     let normal = normal.normalize();
     let transform = Transform::from_translation(position + normal * 0.003).with_rotation(hole_rotation(normal));
     let entity = if pick.modulate {
@@ -381,6 +394,48 @@ fn bullet_hole(
         }
     }
     data.bullet_marks += 1;
+}
+/// Picks one of `choices` with retail's size variation.
+fn pick(data: &mut Impacts, choices: &[Decal]) -> (Decal, Vec2) {
+    data.seed = data.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    let pick = choices[(data.seed >> 8) as usize % choices.len()];
+    data.seed = data.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    let r = ((data.seed >> 8) & 0xffff) as f32 / 65535. * 2. - 1.;
+    (pick, pick.size * (1. + pick.variation * r))
+}
+/// A blood splat from the retail "Blood" group: DecalModulate, so the wall
+/// keeps its own light and the pale texels around the blood leave it as is.
+fn blood_splat(commands: &mut Commands, meshes: &mut Assets<Mesh>, data: &mut Impacts, position: Vec3, normal: Vec3, shotgun: bool) {
+    if !position.is_finite() || !normal.is_finite() || normal.length_squared() < 0.5 {
+        return;
+    }
+    // Low Violence: no blood decals (client blood effects 100f1940/1022f380).
+    if crate::low_violence::on() {
+        return;
+    }
+    let (Some(handle), false) = (data.modulate.clone(), data.blood_decals.is_empty()) else {
+        // No retail decal data (missing game files): the single fallback splat.
+        mark(commands, data, position, normal, if shotgun { 0.6 } else { 0.4 }, true);
+        return;
+    };
+    let choices = data.blood_decals.clone();
+    let (decal, size) = pick(data, &choices);
+    let normal = normal.normalize();
+    let entity = commands
+        .spawn((
+            Mesh3d(meshes.add(hole_mesh(&decal, size, Vec3::ONE))),
+            MeshMaterial3d(handle),
+            Transform::from_translation(position + normal * 0.002).with_rotation(hole_rotation(normal)),
+            bevy::light::NotShadowCaster,
+        ))
+        .id();
+    data.live.push_back(entity);
+    if data.live.len() > 256 {
+        if let Some(old) = data.live.pop_front() {
+            commands.entity(old).try_despawn();
+        }
+    }
+    data.blood_marks += 1;
 }
 fn mark(
     commands: &mut Commands,
@@ -462,6 +517,16 @@ pub fn update(
     if !impacts.hits.is_empty() && std::env::var_os("L4D2R_DECAL_LOG").is_some() {
         println!("Bullet holes: {} at {:?}", impacts.hits.len(), impacts.hits.first().map(|h| h.0));
     }
+    // L4D2R_DECAL_BLOOD: debug, also splat blood where each bullet hole goes
+    // (wall blood captures without needing infected in the shot).
+    if std::env::var_os("L4D2R_DECAL_BLOOD").is_some() {
+        let extra: Vec<BloodHit> = impacts
+            .hits
+            .iter()
+            .map(|(p, n, _)| BloodHit { position: *p + *n * 0.3, direction: -*n, shotgun: false })
+            .collect();
+        impacts.blood.extend(extra);
+    }
     let world = map.as_deref().map(|m| &m.0.world);
     let mut lit = match lit {
         (Some(materials), Some(table)) => Some((materials, table)),
@@ -512,23 +577,10 @@ pub fn update(
         let trace = collision.trace(start, end, Vec3::ZERO);
         if trace.fraction < 1. && trace.normal.length_squared() > 0.5 {
             let position = start + (end - start) * trace.fraction;
-            let moving = logic.world.ents.iter().enumerate().any(|(i, e)| {
-                (e.me.brush.is_some_and(|model| model > 0) || e.me.classname.starts_with("prop_"))
-                    && logic.bounds(i).is_some_and(|(lo, hi)| {
-                        (position.cmpge(lo - Vec3::splat(0.02))
-                            & position.cmple(hi + Vec3::splat(0.02)))
-                        .all()
-                    })
-            });
+            // Only movable entities veto a splat (not trigger or fog volumes).
+            let moving = crate::game::decal_on_movable(Some(&logic), position);
             if !moving {
-                mark(
-                    &mut commands,
-                    &mut impacts,
-                    position,
-                    trace.normal,
-                    if hit.shotgun { 0.6 } else { 0.4 },
-                    true,
-                );
+                blood_splat(&mut commands, &mut meshes, &mut impacts, position, trace.normal, hit.shotgun);
             }
         }
     }
@@ -565,6 +617,16 @@ mod tests {
         assert!(table[&b'Y'][0].modulate);
         assert!(table[&b'N'].is_empty(), "sand gets the blank decal: no hole");
         assert!(table[&b'-'].is_empty());
+        let blood = named_group(
+            r#""Blood" { "decals/blood1_subrect" "1" }"#,
+            "Blood",
+            |_| Some(r#"Subrect { $Material "decals/Decals_Mod2x" $Pos "256 0" $Size "256 256" $decalscale 0.25 }"#.into()),
+            |m| (m == "decals/decals_mod2x").then_some((1024, 512)),
+        );
+        assert_eq!(blood.len(), 1);
+        assert!(blood[0].modulate, "blood is DecalModulate: no white fringe");
+        assert_eq!(blood[0].uv, [0.25, 0., 0.5, 0.5]);
+        assert!((blood[0].size.x / crate::collision::UNIT - 64.).abs() < 1e-3);
     }
     #[test]
     fn holes_face_out_of_the_wall_with_texture_up_toward_the_sky() {

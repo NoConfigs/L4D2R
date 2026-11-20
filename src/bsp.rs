@@ -120,6 +120,77 @@ pub struct World {
     pub visibility: crate::visibility::Data,
     /// Faces lit by switchable/animated light styles (crate::light_styles).
     pub light_styles: Vec<StyledFace>,
+    /// Detail sprites (game lump `dprp`): the grass tufts and weeds vbsp
+    /// scatters over terrain from detail.vbsp (crate::detail_props).
+    pub detail_sprites: Vec<DetailSprite>,
+}
+/// One detail sprite. Renderer space; `rect` is the quad in Source units
+/// (left, top, right, bottom around the origin, already scaled), `uv` its
+/// rectangle on the map's detail material, `light` its baked linear light.
+#[derive(Clone, Debug)]
+pub struct DetailSprite {
+    pub origin: [f32; 3],
+    /// Source yaw (degrees) for fixed-orientation sprites.
+    pub yaw: f32,
+    /// 0 fixed angles, 1 screen aligned, 2 turns about z toward the viewer.
+    pub orientation: u8,
+    pub rect: [f32; 4],
+    pub uv: [f32; 4],
+    pub light: [f32; 3],
+}
+/// Detail sprites from the `dprp` game lump (version 4, 52-byte records).
+/// Detail models (type 0) and shapes are not read.
+fn detail_sprites(b: &[u8]) -> io::Result<Vec<DetailSprite>> {
+    let game = lump(b, 35)?;
+    if game.is_empty() {
+        return Ok(vec![]);
+    }
+    for i in 0..binary::count(game, 0, 64)? {
+        let header = record(&game[4..], i, 16)?;
+        if word(header, 0)? != 0x64707270 || short(header, 4)? != 0 || short(header, 6)? != 4 {
+            continue;
+        }
+        let data = binary::range(b, word(header, 8)? as usize, word(header, 12)? as usize)?;
+        let models = binary::count(data, 0, 4096)?;
+        let mut at = 4 + models * 128;
+        let sprites = binary::count(data, at, 4096)?;
+        at += 4;
+        let dictionary: Vec<[f32; 8]> = (0..sprites)
+            .map(|k| -> io::Result<[f32; 8]> {
+                let r = record(&data[at..], k, 32)?;
+                let mut v = [0.; 8];
+                for (j, out) in v.iter_mut().enumerate() {
+                    *out = binary::f32_at(r, j * 4)?;
+                }
+                Ok(v)
+            })
+            .collect::<io::Result<_>>()?;
+        at += sprites * 32;
+        let count = binary::count(data, at, 1_000_000)?;
+        at += 4;
+        let mut out = Vec::with_capacity(count);
+        for k in 0..count {
+            let r = record(&data[at..], k, 52)?;
+            if r[44] != 1 {
+                continue;
+            }
+            let Some(sprite) = dictionary.get(short(r, 24)? as usize) else { continue };
+            let scale = binary::f32_at(r, 48)?;
+            let scale = if scale.is_finite() && scale > 0. { scale } else { 1. };
+            let exponent = r[31] as i8 as i32;
+            let light = [r[28], r[29], r[30]].map(|c| c as f32 * 2f32.powi(exponent) / 255.);
+            out.push(DetailSprite {
+                origin: convert(binary::vec3(r, 0)?),
+                yaw: binary::f32_at(r, 16)?,
+                orientation: r[40],
+                rect: [sprite[0] * scale, sprite[1] * scale, sprite[2] * scale, sprite[3] * scale],
+                uv: [sprite[4], sprite[5], sprite[6], sprite[7]],
+                light,
+            });
+        }
+        return Ok(out);
+    }
+    Ok(vec![])
 }
 /// A lightmapped face with a non-default light style in any of its four
 /// style slots (`dface_t::styles`). `maps[k]` is the flat lightmap of style
@@ -140,12 +211,21 @@ pub struct LocalLight {
     pub exponent: f32,
     pub attenuation: [f32; 3],
     pub radius: f32,
+    /// dworldlight_t cluster (-1: none): model lighting only takes lights in
+    /// the sample point's PVS, as the engine's light cache does.
+    pub cluster: i32,
 }
 pub struct AmbientField {
     nodes: Vec<u8>,
     planes: Vec<u8>,
     head: i32,
     probes: Vec<(usize, [f32; 3], [[f32; 3]; 6])>,
+    /// Each leaf's probe range in `probes` (pushed in leaf order): a sample
+    /// scanned every probe in the map (c2m2's reveal: ~40 ms of samples).
+    leaf_ranges: Vec<std::ops::Range<usize>>,
+    /// Probes by 256-unit cell, for the nearest-probe fallback (a point in a
+    /// leaf without probes scanned every probe in the map).
+    grid: HashMap<[i32; 3], Vec<usize>>,
 }
 impl AmbientField {
     fn load(b: &[u8], hdr: bool) -> io::Result<Self> {
@@ -153,7 +233,9 @@ impl AmbientField {
         let samples = lump(b, if hdr { 55 } else { 56 })?;
         let leaves = lump(b, 10)?;
         let mut probes = vec![];
+        let mut leaf_ranges = vec![];
         for (leaf_id, index) in indices.chunks_exact(4).enumerate() {
+            let start = probes.len();
             let leaf = record(leaves, leaf_id, 32)?;
             let first = short(index, 2)? as usize;
             for i in first..first + short(index, 0)? as usize {
@@ -171,6 +253,7 @@ impl AmbientField {
                 });
                 probes.push((leaf_id, origin, cube));
             }
+            leaf_ranges.push(start..probes.len());
         }
         Ok(Self {
             nodes: lump(b, 5)?.to_vec(),
@@ -179,7 +262,15 @@ impl AmbientField {
                 .get(36..40)
                 .map(|v| i32::from_le_bytes(v.try_into().unwrap()))
                 .unwrap_or(-1),
+            grid: {
+                let mut grid: HashMap<[i32; 3], Vec<usize>> = HashMap::new();
+                for (i, (_, o, _)) in probes.iter().enumerate() {
+                    grid.entry(o.map(|v| (v / 256.).floor() as i32)).or_default().push(i);
+                }
+                grid
+            },
             probes,
+            leaf_ranges,
         })
     }
     pub fn sample(&self, position: [f32; 3]) -> [[f32; 3]; 6] {
@@ -209,14 +300,48 @@ impl AmbientField {
         // Stay in the native leaf when possible, avoiding light leaking through walls.
         // A hinge/attachment inside solid geometry uses the closest valid probe.
         let nearest = self
-            .probes
+            .leaf_ranges
+            .get(leaf)
+            .and_then(|range| self.probes.get(range.clone()))
+            .unwrap_or(&[])
             .iter()
-            .filter(|(id, _, _)| *id == leaf)
             .min_by(|a, b| distance(&a.1).total_cmp(&distance(&b.1)))
             .or_else(|| {
-                self.probes
-                    .iter()
-                    .min_by(|a, b| distance(&a.1).total_cmp(&distance(&b.1)))
+                // Expanding rings of grid cells; one more ring after the first
+                // hit keeps the nearest exact within a cell.
+                let c = p.map(|v| (v / 256.).floor() as i32);
+                let mut best: Option<&(usize, [f32; 3], [[f32; 3]; 6])> = None;
+                let mut found_at = None;
+                for r in 0..16i32 {
+                    if found_at.is_some_and(|f: i32| r > f + 1) {
+                        break;
+                    }
+                    for x in -r..=r {
+                        for y in -r..=r {
+                            for z in -r..=r {
+                                if x.abs().max(y.abs()).max(z.abs()) != r {
+                                    continue;
+                                }
+                                if let Some(ids) = self.grid.get(&[c[0] + x, c[1] + y, c[2] + z]) {
+                                    for &i in ids {
+                                        let probe = &self.probes[i];
+                                        if best.is_none_or(|b| distance(&probe.1) < distance(&b.1)) {
+                                            best = Some(probe);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if best.is_some() && found_at.is_none() {
+                        found_at = Some(r);
+                    }
+                }
+                best.or_else(|| {
+                    self.probes
+                        .iter()
+                        .min_by(|a, b| distance(&a.1).total_cmp(&distance(&b.1)))
+                })
             });
         nearest.map(|p| p.2).unwrap_or([[0.5; 3]; 6])
     }
@@ -242,6 +367,9 @@ pub struct Surface {
     /// Displacement vertex alpha / 255 (WorldVertexTransition blend);
     /// 0 for flat faces.
     pub blend: Vec<f32>,
+    /// Bumped lightmaps: the atlas u distance from one basis lightmap to the
+    /// next (flat, then bump bases 1-3 side by side); 0 without them.
+    pub bump: Vec<f32>,
     /// The texdata size `uv` was divided by. The engine maps by the base
     /// texture's real size instead, which differs when vbsp sized texdata
     /// from a %tooltexture or the texture changed after compile.
@@ -535,7 +663,31 @@ fn styled_faces(faces: &[u8], texinfo: &[u8], light: &[u8], tiles: &HashMap<usiz
     out
 }
 fn bake_atlas(faces: &[u8], light: &[u8]) -> io::Result<(LightAtlas, HashMap<usize, [usize; 4]>)> {
-    let width = 2048;
+    bake_atlas_bumped(faces, light, &std::collections::HashSet::new())
+}
+/// The lightmap atlas. Faces in `bumped` (SURF_BUMPLIGHT with lightmap
+/// data) carry four lightmaps, flat then the three bump bases; their tile
+/// reserves four (w + 2)-wide slots side by side, the flat one first, so a
+/// basis is the flat texel plus k slot widths.
+fn bake_atlas_bumped(
+    faces: &[u8],
+    light: &[u8],
+    bumped: &std::collections::HashSet<usize>,
+) -> io::Result<(LightAtlas, HashMap<usize, [usize; 4]>)> {
+    for width in [2048, 4096, 8192] {
+        match bake_atlas_width(faces, light, bumped, width) {
+            Err(e) if e.to_string().contains("exceeds") && width < 8192 => continue,
+            result => return result,
+        }
+    }
+    unreachable!()
+}
+fn bake_atlas_width(
+    faces: &[u8],
+    light: &[u8],
+    bumped: &std::collections::HashSet<usize>,
+    width: usize,
+) -> io::Result<(LightAtlas, HashMap<usize, [usize; 4]>)> {
     let mut x = 2;
     let mut y = 0;
     let mut row = 2;
@@ -551,8 +703,10 @@ fn bake_atlas(faces: &[u8], light: &[u8]) -> io::Result<(LightAtlas, HashMap<usi
             return Err(error("Invalid BSP lightmap dimensions"));
         }
         let (w, h) = (w as usize, h as usize);
-        binary::range(light, offset as usize, w * h * 4)?;
-        if x + w + 2 > width {
+        let maps = if bumped.contains(&index) { 4 } else { 1 };
+        binary::range(light, offset as usize, w * h * 4 * maps)?;
+        let span = (w + 2) * maps;
+        if x + span > width {
             x = 0;
             y += row;
             row = 0;
@@ -561,7 +715,7 @@ fn bake_atlas(faces: &[u8], light: &[u8]) -> io::Result<(LightAtlas, HashMap<usi
             return Err(error("BSP lightmap atlas exceeds 8192 pixels"));
         }
         tiles.insert(index, [x + 1, y + 1, w, h]);
-        x += w + 2;
+        x += span;
         row = row.max(h + 2);
     }
     let height = (y + row).max(2).next_power_of_two();
@@ -569,18 +723,23 @@ fn bake_atlas(faces: &[u8], light: &[u8]) -> io::Result<(LightAtlas, HashMap<usi
     for (&index, &[x, y, w, h]) in &tiles {
         let face = record(faces, index, 56)?;
         let offset = word(face, 20)? as usize;
-        for py in 0..h + 2 {
-            for px in 0..w + 2 {
-                let sx = px.saturating_sub(1).min(w - 1);
-                let sy = py.saturating_sub(1).min(h - 1);
-                let sample = binary::range(light, offset + (sy * w + sx) * 4, 4)?;
-                let factor = 2f32.powi(sample[3] as i8 as i32) / 255.;
-                pixels[(y + py - 1) * width + x + px - 1] = [
-                    sample[0] as f32 * factor,
-                    sample[1] as f32 * factor,
-                    sample[2] as f32 * factor,
-                    1.,
-                ];
+        let maps = if bumped.contains(&index) { 4 } else { 1 };
+        for map in 0..maps {
+            let source = offset + map * w * h * 4;
+            let shift = map * (w + 2);
+            for py in 0..h + 2 {
+                for px in 0..w + 2 {
+                    let sx = px.saturating_sub(1).min(w - 1);
+                    let sy = py.saturating_sub(1).min(h - 1);
+                    let sample = binary::range(light, source + (sy * w + sx) * 4, 4)?;
+                    let factor = 2f32.powi(sample[3] as i8 as i32) / 255.;
+                    pixels[(y + py - 1) * width + x + px - 1 + shift] = [
+                        sample[0] as f32 * factor,
+                        sample[1] as f32 * factor,
+                        sample[2] as f32 * factor,
+                        1.,
+                    ];
+                }
             }
         }
     }
@@ -751,6 +910,264 @@ fn oriented_triangle(
     }
     triangle
 }
+/// `Surface::texdata_size` of an overlay: its `uv` is already normalised
+/// (overlay U/V ranges), so `viewer::world_uv` must not rescale it.
+pub const OVERLAY_UV: [f32; 2] = [0., 0.];
+/// Lift off the wall (Source units) so the overlay does not z-fight it.
+const OVERLAY_LIFT: f32 = 0.1;
+/// Compiled info_overlay quads (lump 45, doverlay_t: 352 bytes) as world
+/// surfaces: posters, signs, graffiti and stains were not drawn at all. The
+/// quad is origin + x U + y V (U packed in the UV points' z, V = normal x U),
+/// textured over the U/V ranges and lit through its first target face's
+/// lightmap projection, so it lights exactly like the wall under it.
+/// Not reproduced: clipping to the target faces (a quad wrapping an outside
+/// corner overhangs it) and overlays on displacements (skipped).
+fn overlays(
+    b: &[u8],
+    faces: &[u8],
+    texinfo: &[u8],
+    tiles: &HashMap<usize, [usize; 4]>,
+    atlas: [f32; 2],
+    visibility: &crate::visibility::Data,
+) -> io::Result<Vec<Surface>> {
+    let data = lump(b, 45)?;
+    // One draw per (material, visibility clusters), like world faces.
+    let mut out: BTreeMap<(String, Vec<u16>), Surface> = BTreeMap::new();
+    for o in data.chunks_exact(352) {
+        let tex = short(o, 4)? as i16;
+        let count = (short(o, 6)? & 0x3fff) as usize;
+        if tex < 0 || count == 0 {
+            continue;
+        }
+        let first = word(o, 8)? as usize;
+        let Ok(face) = record(faces, first, 56) else { continue };
+        let on_displacement = short(face, 12)? as i16 >= 0;
+        let points: Vec<[f32; 3]> = (0..4).map(|i| binary::vec3(o, 280 + i * 12)).collect::<io::Result<_>>()?;
+        let origin = binary::vec3(o, 328)?;
+        let n = binary::vec3(o, 340)?;
+        let u = [points[0][2], points[1][2], points[2][2]];
+        let v = [n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2], n[0] * u[1] - n[1] * u[0]];
+        if u.iter().chain(&v).chain(&n).any(|x| !x.is_finite()) || u == [0.; 3] {
+            continue;
+        }
+        let corners: Vec<[f32; 3]> = points
+            .iter()
+            .map(|p| std::array::from_fn(|i| origin[i] + p[0] * u[i] + p[1] * v[i] + n[i] * OVERLAY_LIFT))
+            .collect();
+        let (fu, fv) = ([binary::f32_at(o, 264)?, binary::f32_at(o, 268)?], [binary::f32_at(o, 272)?, binary::f32_at(o, 276)?]);
+        let tex_uv = [[fu[0], fv[0]], [fu[0], fv[1]], [fu[1], fv[1]], [fu[1], fv[0]]];
+        let targets: Vec<usize> = (0..count.min(64))
+            .map(|i| word(o, 8 + i * 4).map(|v| v as usize))
+            .collect::<io::Result<_>>()?;
+        // A corner takes the lightmap of the listed face whose luxel extent
+        // holds it: the first listed face can be a thin strip (c1m3's Gibbs
+        // posters list a 15x2-luxel brick strip first, and sampling outside
+        // it read neighbouring atlas tiles, so the posters glowed). Failing
+        // that, the first face with a lightmap, clamped into its own tile.
+        let light_uv = |p: [f32; 3]| -> io::Result<[f32; 2]> {
+            let mut fallback = None;
+            for &id in &targets {
+                let (Ok(f), Some(&[x, y, _, _])) = (record(faces, id, 56), tiles.get(&id)) else { continue };
+                let Ok(info) = record(texinfo, short(f, 10)? as usize, 72) else { continue };
+                let l = project(info, 32, p)?;
+                let st = [l[0] - word(f, 28)? as i32 as f32, l[1] - word(f, 32)? as i32 as f32];
+                let size = [word(f, 36)? as i32 as f32, word(f, 40)? as i32 as f32];
+                let inside = (0..2).all(|i| st[i] >= -0.5 && st[i] <= size[i] + 0.5);
+                let uv = |st: [f32; 2]| [(st[0] + x as f32 + 0.5) / atlas[0], (st[1] + y as f32 + 0.5) / atlas[1]];
+                if inside {
+                    return Ok(uv(st));
+                }
+                fallback.get_or_insert(uv([st[0].clamp(0., size[0]), st[1].clamp(0., size[1])]));
+            }
+            Ok(fallback.unwrap_or([0.5 / atlas[0], 0.5 / atlas[1]]))
+        };
+        let (material, _) = texture(b, record(texinfo, tex as usize, 72)?)?;
+        let clusters = visibility.clusters_for_face(first);
+        if on_displacement {
+            // Terrain: an 8x8 grid over the quad dropped onto the target
+            // displacements along the overlay normal, lit through the hit
+            // triangle's displacement lightmap coordinates (c5m3 had 177 of
+            // 326 overlays on displacements).
+            let Some(draped) = displacement_overlay(b, faces, &targets, &corners, &tex_uv, n, tiles, atlas)? else {
+                continue;
+            };
+            let surface = out.entry((material.clone(), clusters.clone())).or_insert_with(|| Surface {
+                clusters,
+                model: 0,
+                sky: false,
+                material,
+                positions: vec![],
+                uv: vec![],
+                light_uv: vec![],
+                blend: vec![],
+                bump: vec![],
+                texdata_size: OVERLAY_UV,
+            });
+            for (p, uv, luv) in draped {
+                surface.positions.push(convert(p));
+                surface.uv.push(uv);
+                surface.light_uv.push(luv);
+                surface.blend.push(0.);
+            }
+            continue;
+        }
+        let surface = out.entry((material.clone(), clusters.clone())).or_insert_with(|| Surface {
+            clusters,
+            model: 0,
+            sky: false,
+            material,
+            positions: vec![],
+            uv: vec![],
+            light_uv: vec![],
+            blend: vec![],
+            bump: vec![],
+            texdata_size: OVERLAY_UV,
+        });
+        for tri in [[0, 1, 2], [0, 2, 3]] {
+            let triangle = oriented_triangle(tri.map(|i| (corners[i], corners[i], tex_uv[i])), n);
+            for (p, _, uv) in triangle {
+                surface.positions.push(convert(p));
+                surface.uv.push(uv);
+                surface.light_uv.push(light_uv(p)?);
+                surface.blend.push(0.);
+            }
+        }
+    }
+    Ok(out.into_values().collect())
+}
+/// The triangles of an overlay draped over its target displacements:
+/// (position, texture uv, lightmap uv) per vertex, three per triangle, or
+/// None when no grid point lands on them.
+#[allow(clippy::too_many_arguments)]
+fn displacement_overlay(
+    b: &[u8],
+    faces: &[u8],
+    targets: &[usize],
+    corners: &[[f32; 3]],
+    tex_uv: &[[f32; 2]; 4],
+    n: [f32; 3],
+    tiles: &HashMap<usize, [usize; 4]>,
+    atlas: [f32; 2],
+) -> io::Result<Option<Vec<([f32; 3], [f32; 2], [f32; 2])>>> {
+    const STEPS: usize = 8;
+    const REACH: f32 = 64.;
+    let (vertices, edges, surfedges) = (lump(b, 3)?, lump(b, 12)?, lump(b, 13)?);
+    // (corner positions, lightmap uv per corner) per displacement triangle.
+    let mut triangles: Vec<([[f32; 3]; 3], [[f32; 2]; 3])> = vec![];
+    for &id in targets {
+        let Ok(face) = record(faces, id, 56) else { continue };
+        let disp = short(face, 12)? as i16;
+        let Some(&[x, y, w, h]) = tiles.get(&id) else { continue };
+        if disp < 0 {
+            continue;
+        }
+        let start = word(face, 4)? as usize;
+        let len = short(face, 8)? as usize;
+        let mut polygon = vec![];
+        for i in 0..len {
+            let signed = word(record(surfedges, start + i, 4)?, 0)? as i32;
+            let edge = record(edges, signed.unsigned_abs() as usize, 4)?;
+            let vertex = short(edge, if signed < 0 { 2 } else { 0 })? as usize;
+            polygon.push(binary::vec3(record(vertices, vertex, 12)?, 0)?);
+        }
+        let Ok(((cells, grid), _)) =
+            displacement_grid_alpha(record(lump(b, 26)?, disp as usize, 176)?, lump(b, 33)?, &polygon)
+        else {
+            continue;
+        };
+        let luv = |g: [f32; 2]| {
+            [
+                (g[0] * (w - 1) as f32 + x as f32 + 0.5) / atlas[0],
+                (g[1] * (h - 1) as f32 + y as f32 + 0.5) / atlas[1],
+            ]
+        };
+        for gy in 0..cells {
+            for gx in 0..cells {
+                let a = gy * (cells + 1) + gx;
+                let d = a + cells + 1;
+                for t in [[a, d, a + 1], [d, d + 1, a + 1]] {
+                    triangles.push((t.map(|i| grid[i].0), t.map(|i| luv(grid[i].2))));
+                }
+            }
+        }
+    }
+    if triangles.is_empty() {
+        return Ok(None);
+    }
+    let sub = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let cross = |a: [f32; 3], b: [f32; 3]| {
+        [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    };
+    let down = [-n[0], -n[1], -n[2]];
+    // Drop a point onto the nearest displacement triangle along -normal.
+    let drop = |p: [f32; 3]| -> Option<([f32; 3], [f32; 2])> {
+        let origin = [p[0] + n[0] * REACH, p[1] + n[1] * REACH, p[2] + n[2] * REACH];
+        let mut best: Option<(f32, [f32; 3], [f32; 2])> = None;
+        for (tri, luv) in &triangles {
+            let (e1, e2) = (sub(tri[1], tri[0]), sub(tri[2], tri[0]));
+            let pv = cross(down, e2);
+            let det = dot(e1, pv);
+            if det.abs() < 1e-6 {
+                continue;
+            }
+            let tv = sub(origin, tri[0]);
+            let u = dot(tv, pv) / det;
+            let qv = cross(tv, e1);
+            let v = dot(down, qv) / det;
+            if !(-1e-4..=1. + 1e-4).contains(&u) || v < -1e-4 || u + v > 1. + 1e-4 {
+                continue;
+            }
+            let t = dot(e2, qv) / det;
+            if !(0. ..=2. * REACH).contains(&t) || best.is_some_and(|(bt, _, _)| bt <= t) {
+                continue;
+            }
+            let w0 = 1. - u - v;
+            let hit = std::array::from_fn(|i| origin[i] + down[i] * t + n[i] * OVERLAY_LIFT);
+            let l = [
+                w0 * luv[0][0] + u * luv[1][0] + v * luv[2][0],
+                w0 * luv[0][1] + u * luv[1][1] + v * luv[2][1],
+            ];
+            best = Some((t, hit, l));
+        }
+        best.map(|(_, p, l)| (p, l))
+    };
+    let lerp2 = |a: [f32; 2], b: [f32; 2], t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    let lerp3 = |a: [f32; 3], b: [f32; 3], t: f32| -> [f32; 3] { std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t) };
+    // Corners 0-1-2-3 are (U0,V0) (U0,V1) (U1,V1) (U1,V0): s runs 0->3, t 0->1.
+    let point = |s: f32, t: f32| {
+        let p = lerp3(lerp3(corners[0], corners[3], s), lerp3(corners[1], corners[2], s), t);
+        let uv = lerp2(lerp2(tex_uv[0], tex_uv[3], s), lerp2(tex_uv[1], tex_uv[2], s), t);
+        (drop(p), uv)
+    };
+    let mut grid = vec![];
+    for j in 0..=STEPS {
+        for i in 0..=STEPS {
+            grid.push(point(i as f32 / STEPS as f32, j as f32 / STEPS as f32));
+        }
+    }
+    let mut out = vec![];
+    for j in 0..STEPS {
+        for i in 0..STEPS {
+            let a = j * (STEPS + 1) + i;
+            for tri in [[a, a + STEPS + 1, a + 1], [a + STEPS + 1, a + STEPS + 2, a + 1]] {
+                let vs: Vec<([f32; 3], [f32; 2], [f32; 2])> = tri
+                    .iter()
+                    .filter_map(|&k| grid[k].0.map(|(p, l)| (p, grid[k].1, l)))
+                    .collect();
+                if vs.len() != 3 {
+                    continue;
+                }
+                let triangle = oriented_triangle([0, 1, 2].map(|k| (vs[k].0, vs[k].0, vs[k].1)), n);
+                for (p, _, uv) in triangle {
+                    let l = vs.iter().find(|v| v.0 == p).map_or(vs[0].2, |v| v.2);
+                    out.push((p, uv, l));
+                }
+            }
+        }
+    }
+    Ok((!out.is_empty()).then_some(out))
+}
 pub fn parse(b: &[u8]) -> io::Result<World> {
     if b.get(..4) != Some(b"VBSP") || word(b, 4)? != 21 || b.len() < 1036 {
         return Err(error("Expected an L4D2 version 21 BSP"));
@@ -786,6 +1203,11 @@ pub fn parse(b: &[u8]) -> io::Result<World> {
             });
         }
     }
+    // Brightest skylight first: callers take `suns.first()` as the map's sun.
+    // c1m1 lists a dim near-vertical fill skylight (0.03) before its real
+    // light_environment sun (1.2, pitch -14), so models lost their sun.
+    let luminance = |s: &Sunlight| s.intensity[0] * 0.2125 + s.intensity[1] * 0.7154 + s.intensity[2] * 0.0721;
+    suns.sort_by(|a, b| luminance(b).total_cmp(&luminance(a)));
     for light in lights.chunks_exact(stride) {
         let kind = word(light, 40 + extra)?;
         if matches!(kind, 1 | 2) && word(light, 44 + extra)? == 0 {
@@ -801,6 +1223,7 @@ pub fn parse(b: &[u8]) -> io::Result<World> {
                 exponent: binary::f32_at(light, 56 + extra)?,
                 radius: binary::f32_at(light, 60 + extra)?,
                 attenuation: binary::vec3(light, 64 + extra)?,
+                cluster: word(light, 36 + extra)? as i32,
             });
         }
     }
@@ -964,7 +1387,21 @@ pub fn parse(b: &[u8]) -> io::Result<World> {
             }
         }
     }
-    let (lightmap, tiles) = bake_atlas(faces, light)?;
+    let bumped: std::collections::HashSet<usize> = faces
+        .chunks_exact(56)
+        .enumerate()
+        .filter(|(_, f)| {
+            word(f, 20).is_ok_and(|o| o as i32 >= 0)
+                && short(f, 10)
+                    .ok()
+                    .filter(|t| *t as i16 >= 0)
+                    .and_then(|t| record(texinfo, t as usize, 72).ok())
+                    .and_then(|info| word(info, 64).ok())
+                    .is_some_and(|flags| flags & 0x800 != 0)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let (lightmap, tiles) = bake_atlas_bumped(faces, light, &bumped)?;
     let light_styles = styled_faces(faces, texinfo, light, &tiles);
     let visibility = crate::visibility::Data::parse(b, faces.len() / 56)?;
     let mut groups: BTreeMap<(usize, String, bool, Vec<u16>), Surface> = BTreeMap::new();
@@ -1019,6 +1456,7 @@ pub fn parse(b: &[u8]) -> io::Result<World> {
                     uv: vec![],
                     light_uv: vec![],
                     blend: vec![],
+                    bump: vec![],
                     texdata_size: size,
                 });
             let mut polygon = vec![];
@@ -1072,7 +1510,20 @@ pub fn parse(b: &[u8]) -> io::Result<World> {
                 }
             }
             for triangle in triangles {
-                for (source, base, grid_uv) in oriented_triangle(triangle, normal) {
+                // Displacements wind by the flat base grid: a cliff or an
+                // overhang raised from a floor quad faces away from the base
+                // plane, and re-orienting each displaced triangle flipped
+                // those to back faces (c13m1's start cliff drew as a hole
+                // onto the 3D skybox, with stray slabs).
+                let oriented = if disp >= 0 {
+                    oriented_triangle(triangle.map(|(_, base, uv)| (base, base, uv)), normal)
+                        .map(|(base, _, uv)| {
+                            *triangle.iter().find(|t| t.1 == base && t.2 == uv).expect("grid corner")
+                        })
+                } else {
+                    oriented_triangle(triangle, normal)
+                };
+                for (source, base, grid_uv) in oriented {
                     let p = convert(source);
                     group.positions.push(p);
                     if model_index == 0 {
@@ -1106,6 +1557,10 @@ pub fn parse(b: &[u8]) -> io::Result<World> {
                         [0.5 / lightmap.width as f32, 0.5 / lightmap.height as f32]
                     };
                     group.light_uv.push(luv);
+                    group.bump.push(match (bumped.contains(&index), tiles.get(&index)) {
+                        (true, Some(&[_, _, w, _])) => (w + 2) as f32 / lightmap.width as f32,
+                        _ => 0.,
+                    });
                 }
             }
             if model_index == 0 {
@@ -1117,11 +1572,15 @@ pub fn parse(b: &[u8]) -> io::Result<World> {
         return Err(error("No supported static world faces"));
     }
     let spawn = spawn(lump(b, 0)?).unwrap_or(positions[0]);
+    let mut surfaces: Vec<Surface> = groups.into_values().collect();
+    surfaces.extend(overlays(b, faces, texinfo, &tiles, [lightmap.width as f32, lightmap.height as f32], &visibility)?);
+    let detail_sprites = detail_sprites(b).unwrap_or_default();
     Ok(World {
+        detail_sprites,
         positions,
         spawn,
         faces: rendered,
-        surfaces: groups.into_values().collect(),
+        surfaces,
         props,
         brushes,
         entities,
@@ -1161,6 +1620,50 @@ mod tests {
             .collect();
         assert_eq!(names.len(), 2, "{names:?}");
         assert!(names.iter().all(|n| n.starts_with("c1m1_skybox_particles_")));
+    }
+    /// c2m2's start room: the Midnight Riders posters and safe-room graffiti
+    /// are info_overlays, drawn as world surfaces on the wall.
+    #[test]
+    fn fairgrounds_overlays_become_wall_surfaces() {
+        let root =
+            std::path::Path::new(r"C:\Program Files (x86)\Steam\steamapps\common\Left 4 Dead 2");
+        let path = root.join("left4dead2/maps/c2m2_fairgrounds.bsp");
+        if !path.exists() {
+            return;
+        }
+        let world = load_file(&path, root).unwrap();
+        let posters: Vec<_> = world
+            .surfaces
+            .iter()
+            .filter(|s| s.texdata_size == OVERLAY_UV && s.material == "signs/poster_midnight_riders_01")
+            .collect();
+        assert!(!posters.is_empty());
+        let near = posters.iter().flat_map(|s| s.positions.iter()).any(|p| {
+            let source = [p[0] / 0.0254, -p[2] / 0.0254, p[1] / 0.0254];
+            (source[0] - 1740.).abs() < 2. && (source[1] - 2849.).abs() < 40. && (source[2] - 79.).abs() < 60.
+        });
+        assert!(near, "poster quad on the start-room wall");
+        for s in &posters {
+            assert!(s.light_uv.iter().flatten().all(|v| (0. ..=1.).contains(v)));
+            assert!(s.uv.iter().flatten().all(|v| v.is_finite()));
+        }
+    }
+    /// c1m1 has a dim fill skylight listed before its light_environment
+    /// sun; the sun (pitch -14, yaw 30) must come first.
+    #[test]
+    fn hotel_sun_is_the_brightest_skylight() {
+        let root =
+            std::path::Path::new(r"C:\Program Files (x86)\Steam\steamapps\common\Left 4 Dead 2");
+        let path = root.join("left4dead2/maps/c1m1_hotel.bsp");
+        if !path.exists() {
+            return;
+        }
+        let world = load_file(&path, root).unwrap();
+        assert_eq!(world.suns.len(), 2);
+        let sun = &world.suns[0];
+        assert!(sun.intensity[0] > 1., "{:?}", sun.intensity);
+        // Toward the sun: low (about 14 degrees up).
+        assert!((sun.direction[1] - 14f32.to_radians().sin()).abs() < 0.02, "{:?}", sun.direction);
     }
     #[test]
     fn highway_displacements_stay_in_their_baked_lightmap_tiles() {
@@ -1229,6 +1732,20 @@ mod tests {
         assert_eq!(cells, 4);
         assert_eq!(grid[12], ([50., 50., 10.], [50., 50., 0.], [0.5, 0.5]));
         assert!(displacement_grid(&info, &vertices[..20], &[[0.; 3]; 4]).is_err());
+    }
+    #[test]
+    fn displacement_winding_follows_the_base_grid() {
+        // A floor quad raised into a wall leaning back past vertical: the
+        // displaced triangle faces away from the base normal and must keep
+        // the grid winding, not be flipped per triangle.
+        let base = [[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]];
+        let raised = [[0., 0., 0.], [1., 0., 0.], [0., -0.2, 1.]];
+        let triangle: [([f32; 3], [f32; 3], [f32; 2]); 3] =
+            std::array::from_fn(|k| (raised[k], base[k], [k as f32, 0.]));
+        let by_base = oriented_triangle(triangle.map(|(_, b, uv)| (b, b, uv)), [0., 0., 1.]);
+        assert_eq!(by_base.map(|t| t.2), triangle.map(|t| t.2), "base winding kept");
+        let by_displaced = oriented_triangle(triangle, [0., 0., 1.]);
+        assert_ne!(by_displaced.map(|t| t.2), triangle.map(|t| t.2), "per-triangle check flips it");
     }
     #[test]
     fn winding_matches_face_plane_without_disabling_culling() {

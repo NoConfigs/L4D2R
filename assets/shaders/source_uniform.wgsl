@@ -34,5 +34,6 @@ struct SourceUniform {
     cap_phong: CapPhongUniform,
     envmap_tint: vec4<f32>,
     envmap_params: vec4<f32>,
+    bump: vec4<f32>,
 }
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> source_uniform: SourceUniform;

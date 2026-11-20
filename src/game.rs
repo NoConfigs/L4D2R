@@ -418,7 +418,14 @@ pub(crate) fn prepare(
     if let Some(campaign) = catalog
         .campaigns
         .iter()
-        .find(|c| c.chapters.iter().any(|ch| ch.map == path))
+        // By map name: a launch path can differ in case or separators from
+        // the catalog's (a direct c8m1 launch kept the L4D2 survivors).
+        .find(|c| {
+            c.chapters.iter().any(|ch| {
+                ch.map == path
+                    || ch.map.file_stem().zip(path.file_stem()).is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+            })
+        })
     {
         session.original = campaign.original;
         if !crate::campaign_settings::Survivor::roster(campaign.original)
@@ -458,9 +465,24 @@ pub(crate) fn prepare(
             })
         })
         .flatten();
+    // A position with a GameMode belongs to that mode only (c1m4's
+    // "scavenge_position4" names Coach; taken in coop, it put the player
+    // below the atrium).
+    let mode_name = match mode {
+        bsp::MapMode::Campaign => "coop",
+        bsp::MapMode::Survival => "survival",
+        bsp::MapMode::Scavenge => "scavenge",
+        bsp::MapMode::Versus => "versus",
+    };
+    let for_mode = |e: &&std::collections::BTreeMap<String, String>| {
+        e.get("gamemode").is_none_or(|m| {
+            m.split(',').any(|m| m.trim().eq_ignore_ascii_case(mode_name))
+                || (mode == bsp::MapMode::Versus && m.trim().eq_ignore_ascii_case("coop"))
+        })
+    };
     let local_spawn = survival_spawn
         .or_else(|| {
-            spawn_entities.iter().copied().find(|e| {
+            spawn_entities.iter().copied().filter(for_mode).find(|e| {
                 e.get("classname")
                     .is_some_and(|c| c == "info_survivor_position")
                     && e.get("survivorname")
@@ -474,15 +496,19 @@ pub(crate) fn prepare(
                 .find(|e| e.get("classname").is_some_and(|c| c == "info_player_start"))
         })
         .or_else(|| {
+            // Match by map name: a capture or menu start may pass an
+            // absolute path where the catalog holds a mount-relative one.
+            let stem = |p: &std::path::Path| p.file_stem().map(|s| s.to_ascii_lowercase());
             let previous = catalog.campaigns.iter().find_map(|c| {
-                let i = c.chapters.iter().position(|ch| ch.map == path)?;
+                let i = c.chapters.iter().position(|ch| ch.map == path || stem(&ch.map) == stem(path))?;
                 i.checked_sub(1).map(|p| &c.chapters[p].map)
             })?;
             let previous_entities =
                 l4d2_formats::bsp::Bsp::parse(bsp::load_bytes(previous, root).ok()?).ok()?;
             let current_name = path.file_stem()?.to_str()?;
             let incoming = previous_entities.entities.iter().find_map(|e| {
-                (e.get("classname") == Some("trigger_changelevel")
+                // L4D2 maps use info_changelevel.
+                (matches!(e.get("classname"), Some("trigger_changelevel" | "info_changelevel"))
                     && e.get("map")
                         .is_some_and(|m| m.eq_ignore_ascii_case(current_name)))
                 .then(|| e.get("landmark"))
@@ -559,6 +585,7 @@ pub(crate) fn prepare(
     let mut angles = spawn_entities
         .iter()
         .copied()
+        .filter(for_mode)
         .find(|e| {
             e.get("classname")
                 .is_some_and(|c| c == "info_survivor_position")
@@ -853,6 +880,27 @@ pub(crate) fn prepare(
         )],
     )?;
     let mut squad = vec![];
+    // Unnamed start positions near the player's spawn (c2m2's four
+    // survivor_start_coop), nearest first, the player's own excluded: bots
+    // take these like retail. The sideways fallback put c2m2's Coach on the
+    // saferoom table.
+    let mut free_starts: Vec<Vec3> = scene
+        .world
+        .entities
+        .iter()
+        .filter(|e| {
+            e.get("classname").is_some_and(|c| c == "info_survivor_position")
+                && e.get("survivorname").is_none()
+                && e.get("gamemode").is_none()
+        })
+        .map(|e| Vec3::from_array(binary::source_position(crate::kv::vector(e.get("origin")))))
+        .filter(|p| {
+            let d = (*p - spawn).with_y(0.).length();
+            d > 0.3 && d < 12. && (p.y - spawn.y).abs() < 3.
+        })
+        .collect();
+    free_starts.sort_by(|a, b| a.distance_squared(spawn).total_cmp(&b.distance_squared(spawn)));
+    let mut free_starts = free_starts.into_iter();
     for (index, survivor) in crate::campaign_settings::Survivor::roster(session.original)
         .into_iter()
         .filter(|s| *s != session.survivor)
@@ -874,8 +922,10 @@ pub(crate) fn prepare(
                         .is_some_and(|n| n.eq_ignore_ascii_case(name))
             })
             .map(|e| Vec3::from_array(binary::source_position(crate::kv::vector(e.get("origin")))))
+            .or_else(|| free_starts.next())
             .unwrap_or(spawn + Vec3::X * (index as f32 + 1.) * 1.2);
-        let position = collision.supported_spawn_near(position, HEIGHT)?;
+        // A sideways fallback can land in a wall: share the player's spot.
+        let position = collision.supported_spawn_near(position, HEIGHT).unwrap_or(spawn);
         squad.push(Companion {
             state: Match::new(&pistol),
             position,
@@ -1402,6 +1452,10 @@ pub fn run(root: &Path, path: &Path, capture: Option<String>, verify: bool) -> i
     );
     app.add_systems(
         PostUpdate,
+        crate::source_particles::sync_sky_fog.before(bevy::asset::AssetEventSystems),
+    );
+    app.add_systems(
+        PostUpdate,
         crate::source_particles::update
             .after(crate::gun_effects::update)
             .before(bevy::asset::AssetEventSystems)
@@ -1528,6 +1582,9 @@ pub fn run(root: &Path, path: &Path, capture: Option<String>, verify: bool) -> i
     crate::model_shadows::install(&mut app);
     crate::light_styles::install(&mut app);
     crate::ropes::install(&mut app);
+    crate::env_sprites::install(&mut app);
+    crate::detail_props::install(&mut app);
+    crate::env_sprites::install_transform_debug(&mut app);
     crate::soundscapes::install(&mut app);
     crate::room_dsp::install(&mut app);
     crate::render_warmup::install(&mut app);
@@ -1793,7 +1850,7 @@ fn initialize(
     squad: Res<Squad>,
     logic: Res<crate::l4d2r_cinematic::MapLogic>,
 ) {
-    let (camera, target, exposure) = *camera;
+    let (camera, target, _exposure) = *camera;
     for (id, e) in logic.world.ents.iter().enumerate() {
         if e.me.classname != "info_survivor_position" || e.me.kv("survivorintrosequence").is_none()
         {
@@ -1858,17 +1915,15 @@ fn initialize(
             far: 10.,
             ..default()
         }),
+        // Source draws the view model with the world's tonemap scale; it has
+        // no exposure of its own (native_tonemap::share_world_exposure).
         bevy::camera::Exposure { ev100: 0. },
-        bevy::core_pipeline::tonemapping::Tonemapping::Reinhard,
+        crate::native_tonemap::WORLD_TONEMAPPING,
         Transform::default(),
         RenderLayers::layer(2),
         ViewCamera,
         ChildOf(camera),
     ));
-    if let Some(exposure) = exposure {
-        // Only the world camera reports its exposure (native_tonemap).
-        view.insert(bevy::post_process::auto_exposure::AutoExposure { readback: None, ..exposure.clone() });
-    }
     if let Some(target) = target {
         view.insert(target.clone());
     }
@@ -2089,13 +2144,19 @@ pub(crate) fn controls(
             frontend.restart = true;
         }
         // `--capture-use-at <s>`: press use once (opening cabinets/doors).
-        static USE_AT: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
-        static USED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        let at = *USE_AT.get_or_init(|| {
+        // A comma list presses use at each time.
+        static USE_AT: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+        static USED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let at = USE_AT.get_or_init(|| {
             let args: Vec<String> = std::env::args().collect();
-            args.windows(2).find(|w| w[0] == "--capture-use-at").and_then(|w| w[1].parse().ok())
+            args.windows(2)
+                .find(|w| w[0] == "--capture-use-at")
+                .map(|w| w[1].split(',').filter_map(|t| t.trim().parse().ok()).collect())
+                .unwrap_or_default()
         });
-        if at.is_some_and(|t| s.elapsed >= t) && !USED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        let next = USED.load(std::sync::atomic::Ordering::Relaxed);
+        if at.get(next).is_some_and(|&t| s.elapsed >= t) {
+            USED.store(next + 1, std::sync::atomic::Ordering::Relaxed);
             println!("Capture: pressing use at {:.2}s", s.elapsed);
             input.use_item = true;
         }
@@ -2992,6 +3053,29 @@ fn interact(
             )
         })
         .unwrap_or_default();
+    }
+    if input.use_item && std::env::var_os("L4D2R_USE_LOG").is_some() {
+        for (entity, p, binding) in &pickups {
+            if p.origin.distance(eye) > 3. {
+                continue;
+            }
+            let target = p.origin + Vec3::Y * 0.12;
+            let owner = binding.map(|b| b.0).or_else(|| inside.get(entity).ok().map(|i| i.0));
+            let reach = owner
+                .map_or_else(|| collision.trace(eye, target, Vec3::ZERO), |o| collision.prop_trace(o, eye, target, Vec3::ZERO));
+            println!(
+                "use: {} at {:?} owner {owner:?} active {} aim {:?} reach {:.2} solid {} | pills {} medkit {}",
+                p.class,
+                p.origin,
+                crate::loot::pickup_active(binding, cinematic.as_deref()),
+                pickup_aim_score(eye, forward, p.origin),
+                reach.fraction,
+                reach.start_solid,
+                s.pills,
+                s.medkit
+            );
+        }
+        println!("use: eye {eye:?} nearest {:?}", nearest.map(|(_, p)| &p.class));
     }
     if input.use_item {
         input.use_item = false;
@@ -4532,7 +4616,7 @@ fn bot_lethal_drop_ahead(c: &Collision, feet: Vec3, velocity: Vec3, dt: f32) -> 
 /// brushes, breakables, props): the decal would not follow them. Only
 /// these classes count; trigger, fog and other invisible brush volumes
 /// cover whole areas and must not hide holes on the world behind them.
-fn decal_on_movable(logic: Option<&crate::l4d2r_cinematic::MapLogic>, p: Vec3) -> bool {
+pub(crate) fn decal_on_movable(logic: Option<&crate::l4d2r_cinematic::MapLogic>, p: Vec3) -> bool {
     let Some(l) = logic else { return false };
     l.world.ents.iter().enumerate().any(|(i, e)| {
         let c = e.me.classname.as_str();

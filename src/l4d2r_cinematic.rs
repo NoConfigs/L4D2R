@@ -1088,6 +1088,12 @@ impl MoverPose {
         if self.previous.translation.distance_squared(latest.translation) > 1. {
             self.previous = latest;
         }
+        // At rest: exactly the latest pose. Slerping a rotation with itself
+        // is not bit-exact, so every static map entity (pickups, sleeping
+        // props) read as moved each frame and re-ran transform propagation.
+        if self.previous == latest {
+            return latest;
+        }
         Transform {
             translation: self.previous.translation.lerp(latest.translation, alpha),
             rotation: self.previous.rotation.slerp(latest.rotation, alpha),
@@ -2463,6 +2469,54 @@ mod trigger_tests {
             println!("slot {:?}: plain {plain:.2}, ignoring the cabinet {through:.2}", s.translation);
             assert!(through >= 0.99, "an item in the open cabinet is reachable");
         }
+    }
+    #[test]
+    #[ignore = "sweeps every retail map"]
+    fn every_medical_cabinet_item_is_reachable_once_open() {
+        let root = std::path::Path::new(r"C:\Program Files (x86)\Steam\steamapps\common\Left 4 Dead 2");
+        let Ok(dir) = std::fs::read_dir(root.join("left4dead2/maps")) else { return };
+        let mut failures = vec![];
+        for path in dir.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "bsp")) {
+            let Ok(mut logic) = MapLogic::load(root, &path, true) else { continue };
+            let ids: Vec<usize> = (0..logic.world.ents.len())
+                .filter(|&i| logic.world.ents[i].me.classname == "prop_health_cabinet")
+                .collect();
+            if ids.is_empty() {
+                continue;
+            }
+            let Ok(mut collision) = crate::collision::Collision::load(&path) else { continue };
+            collision.enable_l4d2r(root, &logic).unwrap();
+            collision.sync_entities(&logic);
+            for id in ids {
+                let Some((lo, hi)) = logic.bounds(id) else {
+                    failures.push(format!("{path:?} #{id}: no bounds"));
+                    continue;
+                };
+                let center = (lo + hi) * 0.5;
+                let m = logic.world.world_matrix(id);
+                let mut facing = Vec3::from_array(m.x_axis.truncate().to_array()).with_y(0.).normalize_or_zero();
+                let room = |d: Vec3| collision.prop_trace(id, center, center + d * 1.5, Vec3::ZERO).fraction;
+                if room(-facing) > room(facing) {
+                    facing = -facing;
+                }
+                let eye = center + facing * 0.9;
+                let opened = logic.open_cabinet(eye, (center - eye).normalize(), &collision);
+                let Some((_, _, count, slots)) = opened else {
+                    failures.push(format!("{path:?} #{id}: use from {eye:?} does not open it"));
+                    continue;
+                };
+                for s in slots.iter().take(count.max(slots.len())) {
+                    let target = s.translation + Vec3::Y * 0.12;
+                    let t = collision.prop_trace(id, eye, target, Vec3::ZERO);
+                    let aim = crate::game::pickup_aim_score(eye, (s.translation - eye).normalize(), s.translation);
+                    println!("{:?} #{id} slot {:?}: reach {:.2} aim {aim:?} eye_src {:?}", path.file_stem().unwrap(), s.translation, t.fraction, eye / crate::collision::UNIT);
+                    if t.fraction < 0.99 || aim.is_none() {
+                        failures.push(format!("{path:?} #{id} slot {:?}: reach {:.2}", s.translation, t.fraction));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
     #[test]
     fn restart_brings_back_every_particle_emitter_and_flags_a_rebuild() {

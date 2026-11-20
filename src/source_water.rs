@@ -23,11 +23,18 @@ pub struct Water {
     #[uniform(115)] pub flags: Vec4,
     #[storage(116, read_only)]
     pub lighting_table: Handle<bevy::render::storage::ShaderBuffer>,
+    /// The map's lightmap atlas (set once it exists) for `$lightmapwaterfog`.
+    #[texture(117)] #[sampler(118)]
+    pub lightmap: Option<Handle<Image>>,
+    /// x: `$lightmapwaterfog`.
+    #[uniform(119)] pub lightmap_fog: Vec4,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct WaterKey { sky: bool }
+pub struct WaterKey { sky: bool, lightmap_fog: bool }
 impl From<&Water> for WaterKey {
-    fn from(w: &Water) -> Self { Self { sky: w.flags.w > 0.5 } }
+    fn from(w: &Water) -> Self {
+        Self { sky: w.flags.w > 0.5, lightmap_fog: w.lightmap_fog.x > 0.5 && w.lightmap.is_some() }
+    }
 }
 impl MaterialExtension for Water {
     fn specialize(
@@ -38,6 +45,11 @@ impl MaterialExtension for Water {
     ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
         if key.bind_group_data.sky {
             descriptor.vertex.shader_defs.push("SOURCE_SKY_DEPTH".into());
+        }
+        if key.bind_group_data.lightmap_fog {
+            if let Some(fragment) = descriptor.fragment.as_mut() {
+                fragment.shader_defs.push("WATER_LIGHTMAP_FOG".into());
+            }
         }
         Ok(())
     }
@@ -71,5 +83,7 @@ pub fn extension(
         scroll: Vec4::new(m.scroll[0][0],m.scroll[0][1],m.scroll[1][0],m.scroll[1][1]),
         flags: Vec4::new(if m.normal.is_some() {1.} else {0.},if m.noise.is_some() {1.} else {0.}, if m.refract && !m.force_cheap {1.} else {0.},if sky_surface {1.} else {0.}),
         lighting_table,
+        lightmap: None,
+        lightmap_fog: Vec4::new(if m.lightmap_fog { 1. } else { 0. }, 0., 0., 0.),
     }
 }

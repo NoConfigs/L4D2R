@@ -163,6 +163,8 @@ mod infected_hud;
 mod ai_ladder;
 mod light_styles;
 mod ropes;
+mod env_sprites;
+mod detail_props;
 mod room_dsp;
 mod soundscapes;
 mod model_shadows;

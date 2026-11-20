@@ -17,6 +17,12 @@ pub struct Body {
     disabled: bool,
     pub mass: f32,
     supported_sleep: bool,
+    /// The physics prop this body went to sleep resting on (a box on a box).
+    /// The periodic support re-check only sees the world environment, so a
+    /// body resting on another prop woke every 0.1 s, fell back into the
+    /// pair solver and slept again: c12m3's start (a box on a box, a sack on
+    /// a sack) spent ~23 ms a frame in map::prop_pairs.
+    resting_on: Option<usize>,
     support_clock: f32,
     surface: crate::physics_data::Surface,
     on_floor: bool,
@@ -695,6 +701,7 @@ mod tests {
                         disabled: false,
                         mass: 10.,
                         supported_sleep: false,
+                        resting_on: None,
                         support_clock: 0.,
                         surface: default(),
                         on_floor: false,
@@ -810,6 +817,7 @@ mod tests {
                     disabled: false,
                     mass: 10.,
                     supported_sleep: false,
+                    resting_on: None,
                     support_clock: 0.,
                     surface: default(),
                     on_floor: false,
@@ -1079,6 +1087,7 @@ impl Props {
                     disabled: e.me.spawnflags() & 8 != 0,
                     mass,
                     supported_sleep: false,
+                    resting_on: None,
                     support_clock: 0.,
                     surface,
                     on_floor: false,
@@ -1202,6 +1211,13 @@ impl Props {
         }
         let mut moved = false;
         let debris_collision = collision.without_prop_owners(&owners);
+        // Bodies that hold still: a prop resting on one of these stays asleep.
+        let resting = self
+            .0
+            .iter()
+            .filter(|(id, b)| (b.asleep || b.disabled) && world.ents[**id].alive)
+            .map(|(id, _)| *id)
+            .collect::<std::collections::HashSet<_>>();
         for (&id, body) in &mut self.0 {
             if body.disabled || !world.ents[id].alive {
                 continue;
@@ -1268,12 +1284,21 @@ impl Props {
                     continue;
                 }
                 body.support_clock = 0.;
+                if body.resting_on.is_some_and(|s| resting.contains(&s)) {
+                    continue;
+                }
+                // Asleep inside world geometry after a failed recovery: hold
+                // until the environment changes (a brush toggled away).
+                if body.failed_recovery.is_some_and(|(_, _, tag)| collision.environment_tag() == Some(tag)) {
+                    continue;
+                }
                 let support = collision.prop_environment_trace(&owners, center, center - Vec3::Y * 0.025, extent);
                 if support.fraction < 1. && support.normal.y > 0.6 {
                     continue;
                 }
                 body.asleep = false;
                 body.supported_sleep = false;
+                body.resting_on = None;
             }
             body.on_floor = false;
             crate::ivp_damping::apply(&mut body.velocity,&mut body.angular,dt,
@@ -1314,7 +1339,17 @@ impl Props {
                     moved |= world.ents[id].me.origin != old_origin;
                 } else {
                     body.failed_recovery = tag.map(|tag| (center, extent, tag));
-                    body.velocity *= 0.5;
+                    // A prop placed into world geometry with no free spot
+                    // nearby (c12m3's flour sack and cardboard box) holds
+                    // still until something touches it or the environment
+                    // changes, as in retail. Awake, it fell back into the
+                    // wall every tick and kept its pair in the convex
+                    // solver (~45 ms a frame).
+                    body.asleep = true;
+                    body.supported_sleep = true;
+                    body.resting_on = None;
+                    body.velocity = Vec3::ZERO;
+                    body.angular = Vec3::ZERO;
                 }
                 continue;
             }
@@ -1446,6 +1481,23 @@ impl Props {
             .map(|(&id, _)| id)
             .collect::<std::collections::HashSet<_>>();
         retain_active_pairs(&mut pairs, &mut active, |id| self.0[&id].disabled);
+        // L4D2R_PROP_DEBUG: once a second, the props keeping the solver awake.
+        if std::env::var_os("L4D2R_PROP_DEBUG").is_some() {
+            static TICK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 60 == 0 {
+                let awake: Vec<String> = self
+                    .0
+                    .iter()
+                    .filter(|(_, b)| !b.disabled && !b.asleep)
+                    .map(|(id, _)| format!("{id}:{}", world.ents[*id].me.kv("model").unwrap_or("")))
+                    .collect();
+                println!("L4D2R props: {} pairs, {} awake: {:?}", pairs.len(), awake.len(), &awake[..awake.len().min(12)]);
+                for &(a, b) in &pairs {
+                    let hulls = |id: usize| self.0[&id].hulls.len();
+                    println!("L4D2R pair {a}({} hulls, asleep {}, v {:?} w {:?}) - {b}({} hulls, asleep {}, v {:?} w {:?})", hulls(a), self.0[&a].asleep, self.0[&a].velocity, self.0[&a].angular, hulls(b), self.0[&b].asleep, self.0[&b].velocity, self.0[&b].angular);
+                }
+            }
+        }
         if pairs.is_empty() {
             return false;
         }
@@ -1631,6 +1683,7 @@ impl Props {
                         if ba.velocity.length_squared() < 0.001 {
                             ba.asleep = true;
                             ba.velocity = Vec3::ZERO;
+                            ba.resting_on = Some(b);
                         }
                     }
                     if n.y > 0.6 {
@@ -1638,6 +1691,7 @@ impl Props {
                         if bb.velocity.length_squared() < 0.001 {
                             bb.asleep = true;
                             bb.velocity = Vec3::ZERO;
+                            bb.resting_on = Some(a);
                         }
                     }
                 }

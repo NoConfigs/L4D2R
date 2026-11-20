@@ -308,7 +308,9 @@ fn setup(
             shadow_normal_bias: 0.05,
             ..default()
         },
-        Transform::from_xyz(0., 0.08, -0.12),
+        // Retail's beam leaves from the gun side: its spot sits right of and
+        // below the crosshair (c1m2 store, 19 Nov).
+        Transform::from_xyz(0.2, -0.1, -0.12),
         Visibility::Visible,
         bevy::camera::visibility::NoFrustumCulling,
         bevy::camera::visibility::RenderLayers::from_layers(&[0, 1]),

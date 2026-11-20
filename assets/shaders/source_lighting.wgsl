@@ -26,6 +26,9 @@ struct SourceVertexOutput {
 #ifdef SOURCE_BLEND
     @location(13) source_blend: f32,
 #endif
+#ifdef SOURCE_BUMPED
+    @location(14) source_bump: f32,
+#endif
     // This is `clip position` when the struct is used as a vertex stage output
     // and `frag coord` when used as a fragment stage input
     @builtin(position) position: vec4<f32>,
@@ -107,9 +110,28 @@ struct SourceLight {
 }
 @group(#{MATERIAL_BIND_GROUP}) @binding(107) var<storage, read> lighting_table: array<SourceLight>;
 
+@group(#{MATERIAL_BIND_GROUP}) @binding(134) var bump_texture: texture_2d<f32>;
+#ifndef SOURCE_MOBILE_SAMPLERS
+@group(#{MATERIAL_BIND_GROUP}) @binding(135) var bump_sampler: sampler;
+#endif
 @group(#{MATERIAL_BIND_GROUP}) @binding(108) var emission_texture: texture_2d<f32>;
 #ifndef SOURCE_MOBILE_SAMPLERS
 @group(#{MATERIAL_BIND_GROUP}) @binding(109) var emission_sampler: sampler;
+#endif
+#ifdef SOURCE_CAP_PHONG
+// Phong diffuse for one light; `$lightwarptexture` (fresnel.w, bound in the
+// emission slot) replaces it with 2 x the ramp at the half-Lambert value.
+fn cap_light(ndotl: f32) -> vec3<f32> {
+    if source_uniform.cap_phong.fresnel.w > 0.5 {
+        let uv = vec2<f32>(clamp(ndotl * 0.5 + 0.5, 0.0, 1.0), 0.5);
+#ifdef SOURCE_MOBILE_SAMPLERS
+        return 2.0 * textureSampleLevel(emission_texture, pbr_bindings::base_color_sampler, uv, 0.0).rgb;
+#else
+        return 2.0 * textureSampleLevel(emission_texture, emission_sampler, uv, 0.0).rgb;
+#endif
+    }
+    return vec3<f32>(cap_diffuse(ndotl));
+}
 #endif
 
 
@@ -273,9 +295,18 @@ fn fragment(in: SourceVertexOutput, @builtin(front_facing) is_front: bool) -> Fr
     input.material.base_color.a *= glass_coverage;
 #endif
     input.material.base_color = alpha_discard(input.material, input.material.base_color);
+#ifdef SOURCE_FENCE
+    // Fence render state: the alpha test of the blended pass.
+    if input.material.base_color.a < source_uniform.lightmap_params.z { discard; }
+#endif
 #ifdef SOURCE_CAP_PHONG
 #ifdef VERTEX_UVS_A
-    let cap = cap_surface(in.uv);
+#ifdef SOURCE_MOBILE_SAMPLERS
+    let cap_exponent_map = textureSample(bump_texture, pbr_bindings::base_color_sampler, in.uv);
+#else
+    let cap_exponent_map = textureSample(bump_texture, bump_sampler, in.uv);
+#endif
+    let cap = cap_surface(in.uv, cap_exponent_map);
     let cap_view = normalize(view.world_position.xyz - input.world_position.xyz);
 #endif
 #endif
@@ -305,12 +336,18 @@ fn fragment(in: SourceVertexOutput, @builtin(front_facing) is_front: bool) -> Fr
             + cube[select(2u, 3u, n.y < 0.0)].rgb * n.y * n.y
             + cube[select(4u, 5u, n.z < 0.0)].rgb * n.z * n.z;
 #ifdef SOURCE_CAP_PHONG
-        lighting += sun_col.rgb * cap_diffuse(dot(world_n, sun_dir.xyz));
+        lighting += sun_col.rgb * cap_light(dot(world_n, sun_dir.xyz));
 #ifdef VERTEX_UVS_A
         reflected_light += sun_col.rgb * cap_specular(cap, world_n, cap_view, sun_dir.xyz);
 #endif
 #else
+#ifdef SOURCE_HALF_LAMBERT
+        // $halflambert: Source's wrapped diffuse, (N.L * 0.5 + 0.5)^2.
+        let wrapped = clamp(dot(world_n, sun_dir.xyz) * 0.5 + 0.5, 0.0, 1.0);
+        lighting += sun_col.rgb * wrapped * wrapped;
+#else
         lighting += sun_col.rgb * max(dot(world_n, sun_dir.xyz), 0.0);
+#endif
 #endif
 #ifdef SOURCE_INFECTED
 #ifdef VERTEX_UVS_A
@@ -327,6 +364,41 @@ fn fragment(in: SourceVertexOutput, @builtin(front_facing) is_front: bool) -> Fr
     // Same sample as Bevy's lightmap(): identity uv_rect, mip 0, x exposure.
     if source_uniform.lightmap_params.x > 0.5 && (input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
         lighting = textureSampleLevel(lightmap_texture, lightmap_sampler, in.uv_b, 0.0).rgb * source_uniform.lightmap_params.y;
+#ifdef SOURCE_BUMPED
+#ifdef VERTEX_UVS_A
+        // Bumped lightmaps (SURF_BUMPLIGHT): vrad's three bump-basis
+        // lightmaps sit beside the flat one in the atlas, combined through
+        // the bump map as Source's LightmappedGeneric does.
+        if in.source_bump > 0.0 {
+            let stride = vec2<f32>(in.source_bump, 0.0);
+            let l1 = textureSampleLevel(lightmap_texture, lightmap_sampler, in.uv_b + stride, 0.0).rgb;
+            let l2 = textureSampleLevel(lightmap_texture, lightmap_sampler, in.uv_b + stride * 2.0, 0.0).rgb;
+            let l3 = textureSampleLevel(lightmap_texture, lightmap_sampler, in.uv_b + stride * 3.0, 0.0).rgb;
+#ifdef SOURCE_MOBILE_SAMPLERS
+            let bump = textureSample(bump_texture, pbr_bindings::base_color_sampler, in.uv).rgb;
+#else
+            let bump = textureSample(bump_texture, bump_sampler, in.uv).rgb;
+#endif
+            var basis_light: vec3<f32>;
+            if source_uniform.bump.y > 0.5 {
+                // $ssbump: the channels are the basis weights.
+                basis_light = l1 * bump.x + l2 * bump.y + l3 * bump.z;
+            } else {
+                // Normal map: squared, normalised dot with the tangent-space
+                // bump basis (Source's g_localBumpBasis).
+                let n = normalize(bump * 2.0 - 1.0);
+                var dp = vec3<f32>(
+                    saturate(dot(n, vec3<f32>(0.81649658, 0.0, 0.57735027))),
+                    saturate(dot(n, vec3<f32>(-0.40824829, 0.70710678, 0.57735027))),
+                    saturate(dot(n, vec3<f32>(-0.40824829, -0.70710678, 0.57735027))),
+                );
+                dp = dp * dp;
+                basis_light = (l1 * dp.x + l2 * dp.y + l3 * dp.z) / max(dp.x + dp.y + dp.z, 0.0001);
+            }
+            lighting = basis_light * source_uniform.lightmap_params.y;
+        }
+#endif
+#endif
     }
 #endif
     // Bounded dynamic lights: the flashlight and infected foot light.
@@ -352,7 +424,7 @@ fn fragment(in: SourceVertexOutput, @builtin(front_facing) is_front: bool) -> Fr
             }
             let falloff=pow(max(0.0,1.0-distance2*torch.color_inverse_square_range.w),2.0)/distance2;
 #ifdef SOURCE_CAP_PHONG
-            lighting+=torch.color_inverse_square_range.rgb*0.3*cone*cone*falloff*shadow*cap_diffuse(dot(input.N,-normalize(delta)));
+            lighting+=torch.color_inverse_square_range.rgb*0.3*cone*cone*falloff*shadow*cap_light(dot(input.N,-normalize(delta)));
 #ifdef VERTEX_UVS_A
             reflected_light+=torch.color_inverse_square_range.rgb*0.3*cone*cone*falloff*shadow*cap_specular(cap,normalize(input.N),cap_view,-normalize(delta));
 #endif
@@ -370,7 +442,7 @@ fn fragment(in: SourceVertexOutput, @builtin(front_facing) is_front: bool) -> Fr
             let distance2=max(dot(delta,delta),0.05);
             let falloff=pow(max(0.0,1.0-distance2*torch.color_inverse_square_range.w),2.0)/distance2;
 #ifdef SOURCE_CAP_PHONG
-            lighting+=torch.color_inverse_square_range.rgb*0.3*falloff*cap_diffuse(dot(input.N,normalize(delta)));
+            lighting+=torch.color_inverse_square_range.rgb*0.3*falloff*cap_light(dot(input.N,normalize(delta)));
 #ifdef VERTEX_UVS_A
             reflected_light+=torch.color_inverse_square_range.rgb*0.3*falloff*cap_specular(cap,normalize(input.N),cap_view,normalize(delta));
 #endif
@@ -386,14 +458,19 @@ fn fragment(in: SourceVertexOutput, @builtin(front_facing) is_front: bool) -> Fr
         }
         }
     }
-#ifdef VERTEX_UVS_B
-    // Dynamic model shadows fall on the lightmapped world (Source projects
-    // its render-to-texture shadows onto world brushes).
-    if source_uniform.lightmap_params.x > 0.5 && source_uniform.settings.w < 0.5 && globals.cube[3].w > 0.5 {
+    // Dynamic model shadows fall on the lightmapped world and on static props
+    // (Source's shadow manager projects its render-to-texture shadows onto
+    // brushes and static-prop receivers, not onto other models).
+    var shadow_receiver = source_uniform.lightmap_params.x > 0.5;
+#ifdef VERTEX_COLORS
+    // Static props: baked irradiance in vertex colours, no model lighting,
+    // not the view model.
+    shadow_receiver = shadow_receiver || (source_uniform.settings.y < 0.5 && source_uniform.settings.z < 0.5);
+#endif
+    if shadow_receiver && source_uniform.settings.w < 0.5 && globals.cube[3].w > 0.5 {
         let amount = model_shadow(input.world_position.xyz, normalize(input.N), globals.cube[4].x);
         lighting *= mix(vec3<f32>(1.0), globals.cube[3].xyz, amount);
     }
-#endif
     // Source's baked diffuse is albedo * irradiance, not an additional PBR light.
     // Props carry their baked or ambient irradiance in linear vertex colours.
     var out: FragmentOutput;
@@ -433,6 +510,17 @@ fn fragment(in: SourceVertexOutput, @builtin(front_facing) is_front: bool) -> Fr
             env_mask = textureSample(pbr_bindings::base_color_texture, pbr_bindings::base_color_sampler, in.uv).a;
         } else if params.w > 0.5 {
             env_mask = textureSample(pbr_bindings::normal_map_texture, pbr_bindings::normal_map_sampler, in.uv).a;
+            // $ssbump materials bind no tangent normal map: their bump map
+            // (and its alpha mask) is in the bump slot. Reading the empty
+            // normal slot gave a full mask; c2m2's saferoom plaster showed a
+            // bright cyan reflection of the room light.
+            if source_uniform.bump.y > 0.5 {
+#ifdef SOURCE_MOBILE_SAMPLERS
+                env_mask = textureSample(bump_texture, pbr_bindings::base_color_sampler, in.uv).a;
+#else
+                env_mask = textureSample(bump_texture, bump_sampler, in.uv).a;
+#endif
+            }
         }
 #endif
         reflected_light += spec * env_mask;

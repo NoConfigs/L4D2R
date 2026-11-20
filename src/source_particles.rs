@@ -78,6 +78,11 @@ struct Renderer {
     trail_min: f32,
     trail_fade: f32,
     rope: bool,
+    /// Renderer visibility by camera distance to the proxy control point:
+    /// (distance min, distance max, alpha scale min, alpha scale max), Source
+    /// units. The distance is remapped min..max to 0..1 and the alpha scale
+    /// lerped across it (fog_volume_1024_512: 1 -> 0 over 1512 -> 1712).
+    visibility: Option<[f32; 4]>,
 }
 impl Renderer {
     fn parse(node: &Element) -> Option<Self> {
@@ -112,6 +117,18 @@ impl Renderer {
             trail_min: node.number("min length", 0.).max(0.) * 0.0254,
             trail_fade: node.number("length fade in time", 0.).max(0.),
             rope: name == "render_rope",
+            visibility: {
+                let (lo, hi) = (
+                    node.number("Visibility input distance minimum", 0.),
+                    node.number("Visibility input distance maximum", 0.),
+                );
+                (node.number("Visibility Proxy Input Control Point Number", -1.) >= 0. && (hi - lo).abs() > 0.001).then(|| [
+                    lo,
+                    hi,
+                    node.number("Visibility Alpha Scale minimum", 0.),
+                    node.number("Visibility Alpha Scale maximum", 1.),
+                ])
+            },
         })
     }
 }
@@ -173,6 +190,9 @@ struct Definition {
     rotation: [f32; 2],
     rotation_exponent: f32,
     max: usize,
+    /// PCF "maximum draw distance" in metres: Source does not draw a
+    /// collection farther than this from the view (fog_volume_1024_512 1024u).
+    max_draw_distance: f32,
     trail: f32,
     rope: bool,
     cull_plane: Option<f32>,
@@ -373,6 +393,7 @@ fn definition(elements: &[Element], index: usize) -> Option<Definition> {
         rope: false,
         cull_plane: None,
         max: node.number("max_particles", 1000.).clamp(1., 8192.) as usize,
+        max_draw_distance: node.number("maximum draw distance", 100000.).max(0.) * 0.0254,
         path_steps: None,
         distance_radius: None,
         live_distance_radius: None,
@@ -828,6 +849,10 @@ pub struct Effects {
     rng: UniformRandomStream,
     /// `MapLogic::generation` the batches were built for.
     generation: u64,
+    /// The live fog controller's farz in metres (0: none). Source's far
+    /// plane clips particles with the world: c7m1's distant fire-truck
+    /// smoke (~4900u, farz 2500) drew as a dark blot in retail's haze.
+    far: f32,
 }
 type MaterialCache = HashMap<
     String,
@@ -1085,7 +1110,12 @@ pub fn setup(
                         },
                         TextureDimension::D2,
                         texture.rgba,
-                        if refraction.is_some() {
+                        // SpriteCard reads its base texture with the sRGB decode
+                        // unless $EXTRACTGREENALPHA (retail stdshader_dx9
+                        // 10033f60: EnableSRGBRead(0, true) when that flag is
+                        // off). L4D2R_PFX_RAW: debug, texture and vertex colour
+                        // as stored.
+                        if refraction.is_some() || std::env::var_os("L4D2R_PFX_RAW").is_some() {
                             TextureFormat::Rgba8Unorm
                         } else {
                             TextureFormat::Rgba8UnormSrgb
@@ -1152,19 +1182,27 @@ pub fn setup(
                         extension: crate::particle_pull::ParticlePull {
                             mod2x: crate::material::particle_mod2x(&mut assets, &d.material).unwrap_or(false),
                             depth_blend: crate::material::particle_depth_blend(&mut assets, &d.material).unwrap_or(0.),
+                            sky_fog: Vec4::ZERO,
                             spitter_noise,
                             vertices: pull.buffer.clone(),
                             texture,
                             settings: Vec4::from_array(sprite_settings),
-                            add_self,
+                            // L4D2R_ADDSELF_TEX: debug variant (negative):
+                            // the self-add term from the texture alone.
+                            add_self: if add_self != 0. && std::env::var_os("L4D2R_ADDSELF_TEX").is_some() { -add_self.abs() } else { add_self },
                             dual: Vec4::from_array(dual),
                             effects: Vec4::new(
                                 refraction_amount,
-                                f32::from(crate::material::particle_fog_enabled(
-                                    &mut assets,
-                                    &d.material,
-                                )?),
-                                f32::from(refraction.as_ref().is_some_and(|(_, _, tint)| *tint)),
+                                crate::material::particle_fog_mode(&mut assets, &d.material)?,
+                                // z: refract tint; sprites: 2 = vertex colour
+                                // used as linear (L4D2R_PFX_LINEAR_COLOR, debug).
+                                if refraction.is_some() {
+                                    f32::from(refraction.as_ref().is_some_and(|(_, _, tint)| *tint))
+                                } else if std::env::var_os("L4D2R_PFX_RAW").is_some() {
+                                    2.
+                                } else {
+                                    0.
+                                },
                                 f32::from(noise_path.is_some()),
                             ),
                         },
@@ -1191,7 +1229,15 @@ pub fn setup(
                     .entry(d.material.clone())
                     .or_insert_with(|| {
                         let mut copy = materials.get(&material).cloned().expect("particle material");
-                        copy.extension.effects.y = 0.;
+                        // Fogged sprites take the sky_camera fog in the
+                        // shader (effects.y 3); others stay unfogged.
+                        copy.extension.effects.y = if fogged { 3. } else { 0. };
+                        // Source feathers ($depthblend) in the skybox view's
+                        // own units; drawn scaled up into the world, the
+                        // feather distance scales too (c5m1's skybox smoke
+                        // stayed opaque against the sky buildings).
+                        let sky_scale = map.as_ref().and_then(|m| m.0.world.sky.as_ref()).map_or(1., |s| s.scale.max(1.));
+                        copy.extension.depth_blend *= sky_scale;
                         materials.add(copy)
                     })
                     .clone()
@@ -1290,8 +1336,39 @@ pub fn setup(
         batches,
         rng: UniformRandomStream::new(7),
         generation: logic.generation,
+        far: 0.,
     });
     commands.insert_resource(ParticleCache { definitions, materials: cache });
+    commands.insert_resource(SkyMaterials(sky_materials.into_values().collect()));
+}
+/// The 3D-skybox particle material copies (sync_sky_fog keeps their fog
+/// colour on the sky meshes' exposure-scaled value).
+#[derive(Resource, Default)]
+pub struct SkyMaterials(Vec<Handle<crate::particle_pull::ParticleMaterial>>);
+pub(crate) fn sync_sky_fog(
+    sky: Option<Res<SkyMaterials>>,
+    fog: Option<Res<crate::native_fog::Runtime>>,
+    effects: Option<ResMut<Effects>>,
+    mut materials: ResMut<Assets<crate::particle_pull::ParticleMaterial>>,
+) {
+    if let Some(mut effects) = effects {
+        let far = fog.as_ref().and_then(|f| f.far()).unwrap_or(0.);
+        if effects.far != far {
+            effects.far = far;
+        }
+    }
+    let (Some(sky), Some(color)) = (sky, fog.as_ref().and_then(|f| f.sky_color())) else {
+        return;
+    };
+    for handle in &sky.0 {
+        // Touch a material only for a visible change: get_mut re-uploads it.
+        let stale = materials.get(handle).is_some_and(|m| {
+            m.extension.effects.y == 3. && (m.extension.sky_fog - color).abs().max_element() > 0.002 * color.max_element().max(0.01)
+        });
+        if stale && let Some(mut m) = materials.get_mut(handle) {
+            m.extension.sky_fog = color;
+        }
+    }
 }
 fn empty_mesh() -> Mesh {
     let mut mesh = Mesh::new(
@@ -1500,6 +1577,9 @@ pub fn update(
                 let n = batch.particles.len() as f32;
                 let floor = batch.particles.iter().map(|p| p.position.y).fold(f32::MAX, f32::min);
                 let top = batch.particles.iter().map(|p| p.position.y + p.radius).fold(f32::MIN, f32::max);
+                let faded = |p: &Particle| batch.definition.color_fade.map_or(p.color, |(target, window, _)| p.color.lerp(target, remap(p.age / p.life, window, [0., 1.])));
+                let color = batch.particles.iter().map(|p| faded(p)).sum::<Vec3>() / n * 255.;
+                println!("L4D2RPFX color={:.0} {:.0} {:.0}", color.x, color.y, color.z);
                 println!("L4D2RPFX t={:.1} {} {} {} n={} life={:.2} radius={:.1} age={:.2} span={:.0}u alpha={:.2}",
                     logic.world.time, owner.me.targetname, owner.me.kv("effect_name").unwrap_or(""), batch.definition.material, batch.particles.len(),
                     batch.particles.iter().map(|p| p.life).sum::<f32>() / n,
@@ -1544,6 +1624,7 @@ pub fn update(
     let world_camera = camera;
     let world_frustum = frustum;
     let effects = &mut *effects;
+    let effects_far = effects.far;
     pull.clear();
     let mut total = effects
         .batches
@@ -2155,7 +2236,18 @@ pub fn update(
         }
         total = total.saturating_sub(before - batch.particles.len());
         static CULL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        // The far plane (world only; the 3D skybox has its own view).
+        let reach = if sky.is_none() && effects_far > 0. {
+            d.max_draw_distance.min(effects_far)
+        } else {
+            d.max_draw_distance
+        };
+        let within_draw_distance = reach >= 2500.
+            || batch.particles.iter().any(|p| {
+                p.position.distance_squared(camera.translation) <= (reach + p.radius).powi(2)
+            });
         let visible_geometry = show
+            && within_draw_distance
             && (!*CULL.get_or_init(|| !std::env::args().any(|a| a == "--no-particle-frustum"))
                 || particle_bounds(
                     &batch.particles,
@@ -2170,7 +2262,19 @@ pub fn update(
                         .fold(0., f32::max),
                 )
                 .is_none_or(|bound| frustum.intersects_obb_identity(&bound)));
+        static VIS_WORLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let vis_world = *VIS_WORLD.get_or_init(|| std::env::var_os("L4D2R_PFX_VIS_WORLD").is_some());
         for (renderer_index, renderer) in d.renderers.iter().enumerate() {
+            // Renderer visibility fade by the camera's distance to the
+            // proxy control point (the system origin). 3D-skybox systems
+            // measure in sky space (debug L4D2R_PFX_VIS_WORLD: from the
+            // world camera instead).
+            let visibility_alpha = renderer.visibility.map_or(1., |[lo, hi, alpha_lo, alpha_hi]| {
+                let eye = if vis_world { world_camera.translation } else { camera.translation };
+                let distance = origin.distance(eye) / 0.0254;
+                let t = ((distance - lo) / (hi - lo)).clamp(0., 1.);
+                alpha_lo + (alpha_hi - alpha_lo) * t
+            });
             if let Some(forward_angle) = renderer.screen_rotation {
                 // Keep authored renderer order: a modifier after a sprite
                 // pass changes rotation for subsequent passes/the next frame.
@@ -2378,7 +2482,7 @@ pub fn update(
                     let b = atlas_corner(next_atlas2, corner, new_scale);
                     second_uv.push([a[0], a[1], b[0], b[1]]);
                     frame_blends.push([blend, blend2, screen_fade]);
-                    colors.push([color.x, color.y, color.z, alpha]);
+                    colors.push([color.x, color.y, color.z, alpha * visibility_alpha]);
                 }
             }
             if positions.is_empty() {
@@ -2387,23 +2491,21 @@ pub fn update(
                 }
                 continue;
             }
-            if let Some((origin, rotation, scale, _, _, fog, fog_color)) = sky {
-                for (position, color) in positions.iter_mut().zip(colors.iter_mut()) {
+            let mut sky_fog = Vec::new();
+            if let Some((origin, rotation, scale, _, _, fog, _)) = sky {
+                for position in positions.iter_mut() {
                     let world = *rotation * (Vec3::from_array(*position) - *origin) * *scale;
                     *position = world.to_array();
                     // sky_camera fog (enabled in w), squared like the world
-                    // particle fog; vertex colours are gamma encoded.
+                    // fog. The shader blends to the exposure-scaled colour
+                    // after the texture: blending the vertex colour toward
+                    // the raw colour left c7m1's sky smoke a dark blot
+                    // inside retail's fully fogged horizon.
                     if fog.w != 0. && batch.fogged {
                         let ramp = ((world.distance(world_camera.translation) - fog.x)
                             / (fog.y - fog.x).max(1e-4))
                         .clamp(0., fog.z);
-                        let target = if batch.additive {
-                            Vec3::ZERO
-                        } else {
-                            fog_color.truncate().powf(1. / 2.2)
-                        };
-                        let c = Vec3::new(color[0], color[1], color[2]).lerp(target, ramp * ramp);
-                        color[..3].copy_from_slice(&c.to_array());
+                        sky_fog.push(ramp * ramp);
                     }
                 }
             }
@@ -2418,11 +2520,12 @@ pub fn update(
                 *bound = Aabb::from_min_max(lo, hi);
             }
             if let Ok((mut mesh, mut tag, mut transform)) = draws.get_mut(draw.entity) {
-                match pull.push_animated(
+                match pull.push_fogged(
                     &positions,
                     &uv,
                     &colors,
                     Some((&next_uv, &frame_blends, &second_uv)),
+                    &sky_fog,
                 ) {
                     Some((capacity, packed)) => {
                         if mesh.0 != capacity {
@@ -2532,6 +2635,40 @@ mod tests {
         let mut d=vec![];flatten(&elements,0,&mut HashSet::new(),&mut d);
         assert_eq!(d.iter().map(|v|v.child_delay).collect::<Vec<_>>(),vec![0.,0.5,0.75]);
         assert_eq!(emission_overlap(0.7-d[2].child_delay,0.1,0.,0.),0.);
+    }
+    /// L4D2R_PCF_DUMP=<definition>: prints that definition tree (children,
+    /// functions and their attributes) from whichever PCF holds it.
+    #[test]
+    #[ignore = "debug dump"]
+    fn dump_definition_tree() {
+        let Ok(name) = std::env::var("L4D2R_PCF_DUMP") else { return };
+        let root=std::path::Path::new(r"C:\Program Files (x86)\Steam\steamapps\common\Left 4 Dead 2");if !root.exists(){return;}
+        let mut assets=SourceAssets::new(root,vec![]).unwrap();
+        fn show(e: &[source_pcf::Element], i: usize, depth: usize, seen: &mut HashSet<usize>) {
+            let pad = "  ".repeat(depth);
+            let n = &e[i];
+            println!("{pad}[{}] {}", n.kind, n.name);
+            if !seen.insert(i) { return; }
+            for (k, v) in &n.attributes {
+                match v {
+                    source_pcf::Value::Array(items) if items.iter().all(|x| matches!(x, source_pcf::Value::Reference(_) | source_pcf::Value::Int(_))) && k != "functionName" => {
+                        println!("{pad}  {k}:");
+                        for c in n.references(k) { if c < e.len() { show(e, c, depth + 2, seen); } }
+                    }
+                    _ => println!("{pad}  {k} = {v:?}"),
+                }
+            }
+        }
+        for path in assets.matching_paths(".pcf") {
+            let Ok(bytes)=assets.read(&path) else {continue};
+            let Ok(elements)=source_pcf::parse(&bytes) else {continue};
+            if let Some(i) = elements.iter().position(|e| e.name == name && e.kind == "DmeParticleSystemDefinition") {
+                println!("== {path}");
+                show(&elements, i, 0, &mut HashSet::new());
+                return;
+            }
+        }
+        println!("{name}: not found");
     }
     #[test]
     fn audit_owned_child_delay_metadata() {
@@ -2733,6 +2870,10 @@ mod tests {
         assert!((amount - 0.07625).abs() < 1e-6);
         assert!(tint);
         assert!(!crate::material::particle_fog_enabled(&mut assets, &d.material).unwrap());
+        assert_eq!(crate::material::particle_fog_mode(&mut assets, &d.material).unwrap(), 0.);
+        // The c1m1 rooftop smoke (SpriteCard, $vertexfogamount 1): vertex fog
+        // only, which the world pass skips like retail's HDR path.
+        assert_eq!(crate::material::particle_fog_mode(&mut assets, "particle/smoke1/smoke1.vmt").unwrap(), 2.);
         assert!(!assets.read(&normal).unwrap().is_empty());
         let noise = crate::material::particle_spitter_noise(&mut assets, &d.material)
             .unwrap()

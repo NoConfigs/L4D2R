@@ -48,7 +48,7 @@ pub(super) fn prepare_buffers(
     for (entity, settings) in extracted.changed.drain(..) {
         let (min_log_lum, max_log_lum) = settings.range.into_inner();
         let (low_percent, high_percent) = settings.filter.into_inner();
-        let initial_state = 0.0f32.clamp(min_log_lum, max_log_lum);
+        let initial_state = settings.initial_ev.clamp(min_log_lum, max_log_lum);
 
         let settings = AutoExposureUniform {
             min_log_lum,
@@ -59,6 +59,8 @@ pub(super) fn prepare_buffers(
             speed_up: settings.speed_brighten,
             speed_down: settings.speed_darken,
             exponential_transition_distance: settings.exponential_transition_distance,
+            min_average_luminance: settings.min_average_luminance,
+            max_ev: settings.max_ev,
         };
 
         match buffers.buffers.entry(entity) {

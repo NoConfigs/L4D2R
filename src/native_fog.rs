@@ -66,7 +66,13 @@ pub(crate) fn sky_globals(entities: &[BTreeMap<String, String>]) -> [Vec4; 3] {
             .unwrap_or(default)
     };
     let scale = number("scale", 16.).clamp(1., 128.);
-    let unit = crate::collision::UNIT * scale;
+    // The sky_camera's fog range applies to world-scale distance, not to
+    // sky units x scale: live retail c4m1 (19 Nov) fogs the distant skybox
+    // terrain fully at the map's fogend 2000 and still fully at a forced
+    // 8000, and only partly at 2000 x 32 = 64000, which is what the rewrite
+    // drew (a black band under the horizon instead of retail's haze).
+    let _ = scale;
+    let unit = crate::collision::UNIT;
     let start = number("fogstart", 0.) * unit;
     let end = number("fogend", 0.) * unit;
     // L4D2R_NO_SKY_FOG: debug, turns the 3D skybox fog off.
@@ -586,15 +592,16 @@ mod tests {
         }
     }
     #[test]
-    fn sky_camera_fog_is_scaled_into_world_space_with_far_clip() {
+    fn sky_camera_fog_uses_world_scale_distances_with_far_clip() {
         let entities = crate::kv::entities(
             r#"{"classname" "env_fog_controller" "spawnflags" "1" "fogenable" "1" "fogstart" "256" "fogend" "2500" "farz" "5000"}
 {"classname" "sky_camera" "scale" "32" "fogenable" "1" "fogstart" "256" "fogend" "2500" "fogmaxdensity" "1" "fogcolor" "130 117 107" "clip_3D_skybox_near_to_world_far" "1" "clip_3D_skybox_near_to_world_far_offset" "-175"}"#,
         );
         let [fog, color, clip] = sky_globals(&entities);
         let unit = crate::collision::UNIT;
-        assert!((fog.x - 256. * 32. * unit).abs() < 1e-3);
-        assert!((fog.y - 2500. * 32. * unit).abs() < 1e-3);
+        // Not multiplied by the sky scale (retail c4m1 measurement).
+        assert!((fog.x - 256. * unit).abs() < 1e-3);
+        assert!((fog.y - 2500. * unit).abs() < 1e-3);
         assert_eq!((fog.z, fog.w), (1., 1.));
         assert!(color.x > 0.1 && color.x < 0.3);
         assert!((clip.x - 5000. * unit).abs() < 1e-3);

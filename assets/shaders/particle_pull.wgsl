@@ -25,12 +25,15 @@ struct ParticleVertex {
 @group(#{MATERIAL_BIND_GROUP}) @binding(108) var spitter_noise_sampler: sampler;
 // SpriteCard $DEPTHBLEND: fade distance in metres ($DEPTHBLENDSCALE units), 0 off.
 @group(#{MATERIAL_BIND_GROUP}) @binding(109) var<uniform> depth_blend: f32;
+// 3D-skybox copies (effects.y 3): the sky_camera fog colour, already scaled
+// like the sky meshes' (native_fog::Runtime::sky_color).
+@group(#{MATERIAL_BIND_GROUP}) @binding(110) var<uniform> sky_fog: vec4<f32>;
 struct Output {
     @builtin(position) position: vec4<f32>,
     @location(0) current_uv: vec2<f32>,
     @location(1) next_uv: vec2<f32>,
     @location(2) color: vec4<f32>,
-    @location(3) blend: vec3<f32>,
+    @location(3) blend: vec4<f32>,
     @location(4) second_uv: vec4<f32>,
     @location(5) world_position: vec3<f32>,
 }
@@ -52,7 +55,10 @@ fn vertex(v: Vertex) -> Output {
     // Native Refract VS COLORMODULATE passes the vertex colour through.
     // SpriteCard gamma handling must not darken the refraction tint.
     if effects.x != 0.0 { out.color = p.color * p.blend.z; }
-    out.blend = p.blend.xyz;
+    // Debug (L4D2R_PFX_RAW, effects.z 2): vertex colour without the gamma
+    // decode.
+    if effects.x == 0.0 && effects.z > 1.5 { out.color = p.color * p.blend.z; }
+    out.blend = p.blend;
     out.second_uv = p.second_uv;
     return out;
 }
@@ -108,6 +114,11 @@ fn sprite_color(v: Output) -> vec4<f32> {
 #endif
     if add_self == 0.0 && alpha <= 0.01 { discard; }
     let rgb = frame.rgb * settings.z * v.color.rgb;
+    if add_self < 0.0 {
+        // Debug variant (L4D2R_ADDSELF_TEX): add the texture x $ADDSELF,
+        // without the vertex colour, over the alpha-weighted sprite.
+        return vec4(rgb * alpha - add_self * frame.rgb * frame.a * settings.z, alpha);
+    }
     if add_self != 0.0 {
         return vec4(rgb * alpha * (1.0 + settings.z * add_self * v.color.a), alpha);
     }
@@ -135,7 +146,9 @@ fn fragment(input: Output) -> @location(0) vec4<f32> {
 #endif
     if effects.x == 0.0 { color = vec4(color.rgb * view.exposure, color.a); }
 #ifdef DISTANCE_FOG
-    if effects.y != 0.0 {
+    // effects.y: 1 world pixel fog; 2 SpriteCard vertex fog, which Source's
+    // HDR world pass skips (material::particle_fog_mode).
+    if effects.y == 1.0 {
         let distance = length(v.world_position - view.world_position.xyz);
         let ramp = clamp((distance - fog.be.x) / max(fog.be.y - fog.be.x, 0.0001), 0.0, fog.base_color.a);
         var fog_target = fog.base_color.rgb;
@@ -144,5 +157,13 @@ fn fragment(input: Output) -> @location(0) vec4<f32> {
         color = vec4(mix(color.rgb, fog_target, ramp * ramp), color.a);
     }
 #endif
+    // 3D skybox: the sky_camera fog, its squared ramp per vertex in blend.w,
+    // blended after exposure like the sky meshes (source_lighting).
+    if effects.y == 3.0 {
+        var fog_target = sky_fog.rgb;
+        if add_self != 0.0 { fog_target *= color.a; }
+        if settings.w != 0.0 { fog_target = vec3(0.0); }
+        color = vec4(mix(color.rgb, fog_target, clamp(v.blend.w, 0.0, 1.0)), color.a);
+    }
     return color;
 }

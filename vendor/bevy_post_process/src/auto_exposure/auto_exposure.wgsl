@@ -32,6 +32,8 @@ struct AutoExposure {
     speed_up: f32,
     speed_down: f32,
     exponential_transition_distance: f32,
+    min_average_luminance: f32,
+    max_ev: f32,
 }
 
 struct CompensationCurve {
@@ -170,10 +172,30 @@ fn compute_average(@builtin(local_invocation_index) local_index: u32) {
     // The target exposure is the negative of the average log luminance.
     // The compensation value is added to the target exposure to adjust the exposure for
     // artistic purposes.
-    let target_exposure = textureLoad(tex_compensation, i32(saturate(u) * 255.0), 0).r
+    var target_exposure = textureLoad(tex_compensation, i32(saturate(u) * 255.0), 0).r
         * compensation_curve.compensation_range
         + compensation_curve.min_compensation
         - avg_lum;
+
+    // L4D2 rewrite patch: Source's minimum average luminance (client
+    // 101c6560): the scale is raised so the median metered luminance reaches
+    // min_average_luminance, never past the map's maximum exposure.
+    if settings.min_average_luminance > 0.0 && histogram_sum > 0u {
+        let half = f32(histogram_sum) * 0.5;
+        var median = settings.min_log_lum;
+        // Bin 0 holds everything below the metered range.
+        for (var i = 1u; i < 64u && f32(histogram_shared[0]) < half; i += 1u) {
+            let below = f32(histogram_shared[i - 1u]);
+            let here = f32(histogram_shared[i]);
+            if here >= half {
+                let t = select(0.5, (half - below) / max(here - below, 1.0), here > below);
+                median = (f32(i) - 1.0 + t) / 62.0 * settings.log_lum_range + settings.min_log_lum;
+                break;
+            }
+        }
+        let floor_ev = min(log2(settings.min_average_luminance) - median, settings.max_ev);
+        target_exposure = max(target_exposure, floor_ev);
+    }
 
     // Smoothly adjust the `exposure` towards the `target_exposure`
     let delta = target_exposure - exposure;

@@ -38,6 +38,8 @@ pub struct AutoExposureUniform {
     pub(super) speed_up: f32,
     pub(super) speed_down: f32,
     pub(super) exponential_transition_distance: f32,
+    pub(super) min_average_luminance: f32,
+    pub(super) max_ev: f32,
 }
 
 #[derive(PartialEq, Eq, Hash, Clone)]

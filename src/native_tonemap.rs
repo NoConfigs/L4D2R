@@ -36,6 +36,9 @@ pub(crate) struct Bounds {
     pub target: f32,
     /// Fraction of metered pixels allowed above the target.
     pub bright: f32,
+    /// Source's minimum average (median) luminance, a fraction
+    /// (mat_tonemap_min_avglum 3% unless the controller sets one).
+    pub min_average: f32,
 }
 impl Bounds {
     pub(crate) fn from_map(map: Tonemap) -> Self {
@@ -59,6 +62,7 @@ impl Bounds {
             },
             target: percent(map.percent_target, 45., 1., 100.),
             bright: percent(map.percent_bright_pixels, 1., 0.1, 50.),
+            min_average: percent(map.min_avg_lum, 3., 0.01, 100.),
         }
     }
     /// Histogram band Bevy averages: about the (1 - bright) percentile.
@@ -75,6 +79,12 @@ impl Bounds {
         let down = (3. * 2. * self.rate).min(FRAME_CAP);
         let per_ev = |k: f32, gap: f32| k * gap / (std::f32::consts::LN_2 * 2.);
         (per_ev(up, 3.) * ADAPT_RANGE, per_ev(down, 0.75) * ADAPT_RANGE)
+    }
+    /// The EV a new world view starts at: Source's tonemap scale is reset to
+    /// 1 on level start and clamped to the map's bounds, where Bevy would
+    /// start at EV 0 (scale 1/1.2, below c1m1's minimum of 1).
+    pub(crate) fn initial_ev(self) -> f32 {
+        (1f32.clamp(self.min, self.max) / CAMERA_EXPOSURE).log2()
     }
     pub(crate) fn filter(self) -> std::ops::RangeInclusive<f32> {
         let p = 1. - self.bright;
@@ -242,6 +252,18 @@ pub(crate) fn install_exposure_readback(
             }
         });
 }
+/// The view model takes the world camera's adapted tonemap scale. Its own
+/// auto exposure metered the gun alone to middle grey, so in a dark room
+/// (c1m2's store) a nearly black retail pistol drew fully lit. Bevy's
+/// `Exposure` multiplies by 1/(1.2 x 2^ev100), the world by 2^EV / 1.2.
+pub(crate) fn share_world_exposure(mut views: Query<&mut bevy::camera::Exposure, With<crate::game::ViewCamera>>) {
+    let ev100 = -exposure_scale().log2();
+    for mut exposure in &mut views {
+        if (exposure.ev100 - ev100).abs() > 1e-4 {
+            exposure.ev100 = ev100;
+        }
+    }
+}
 pub(crate) fn install_linear_lut(
     luts: Option<Res<bevy::core_pipeline::tonemapping::TonemappingLuts>>,
     mut images: ResMut<Assets<Image>>,
@@ -298,6 +320,10 @@ pub(crate) fn sync(
         }
         if source {
             camera.filter = bounds.filter();
+            // Median floor (client 101c6560): dark rooms with a bright
+            // window (c8m1's rooftop) read ~2.4x darker than retail without it.
+            camera.min_average_luminance = bounds.min_average;
+            camera.max_ev = (bounds.max / CAMERA_EXPOSURE).log2();
         } else {
             camera.filter = AutoExposure::default().filter;
             camera.metering_mask = default();
@@ -318,7 +344,7 @@ mod tests {
     use super::*;
     #[test]
     fn exposure_adapts_at_the_retail_rate() {
-        let bounds = Bounds { min: 1., max: 5., rate: 0.25, target: 0.45, bright: 0.01 };
+        let bounds = Bounds { min: 1., max: 5., rate: 0.25, target: 0.45, bright: 0.01, min_average: 0.03 };
         let (up, down) = bounds.adapt_speeds();
         // 2 x 0.25 of the scale gap per second at a 2 EV change: 1.08 EV/s per EV.
         assert!((up / ADAPT_RANGE - 0.5 * 3. / (2. * std::f32::consts::LN_2)).abs() < 1e-4);
@@ -378,6 +404,17 @@ mod tests {
         assert!((scaled - 0.45).abs() < 0.01, "{scaled}");
     }
     #[test]
+    fn a_new_view_starts_at_source_scale_one_within_the_maps_bounds() {
+        let at = |min: f32, max: f32| {
+            let b = Bounds { min, max, rate: 1., target: 0.45, bright: 0.01, min_average: 0.03 };
+            b.initial_ev().exp2() * CAMERA_EXPOSURE
+        };
+        assert!((at(1., 5.) - 1.).abs() < 1e-5);
+        assert!((at(0.5, 2.) - 1.).abs() < 1e-5);
+        assert!((at(1.5, 4.) - 1.5).abs() < 1e-5);
+        assert!((at(0.25, 0.75) - 0.75).abs() < 1e-5);
+    }
+    #[test]
     fn invalid_controller_inputs_cannot_poison_the_renderer() {
         let b = Bounds::from_map(Tonemap {
             auto_min: Some(f32::NAN),
@@ -395,6 +432,7 @@ mod tests {
                 rate: 1.,
                 target: 0.45,
                 bright: 0.01,
+                min_average: 0.03,
             }
         );
         b.curve();

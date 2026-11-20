@@ -144,6 +144,13 @@ pub(crate) struct SourceLighting {
     /// $envmapsaturation, $envmapcontrast, base-alpha mask, normal-alpha mask.
     #[uniform(100)]
     pub(crate) envmap_params: Vec4,
+    /// x: bumped lightmaps (SOURCE_BUMPED), y: `$ssbump`.
+    #[uniform(100)]
+    pub(crate) bump: Vec4,
+    /// The `$bumpmap` the bumped-lightmap path reads (linear).
+    #[texture(134)]
+    #[cfg_attr(not(any(target_os = "ios", feature = "mobile-materials")), sampler(135))]
+    pub(crate) bump_map: Option<Handle<Image>>,
 }
 impl SourceLighting {
     pub(crate) fn has_wound_mask(&self) -> bool {
@@ -198,6 +205,8 @@ pub(crate) fn vertex_lit_material(base: StandardMaterial, table: &LightingTable)
             envmap: None,
             envmap_tint: Vec4::ZERO,
             envmap_params: Vec4::ZERO,
+                bump: Vec4::ZERO,
+                bump_map: None,
             blend_texture: None,
             blend_modulate: None,
         },
@@ -280,6 +289,9 @@ pub(crate) struct SourceLightingKey {
     blend: bool,
     blend_modulate: bool,
     envmap: bool,
+    fence: bool,
+    half_lambert: bool,
+    bumped: bool,
 }
 impl From<&SourceLighting> for SourceLightingKey {
     fn from(value: &SourceLighting) -> Self {
@@ -292,6 +304,9 @@ impl From<&SourceLighting> for SourceLightingKey {
             blend: value.blend_texture.is_some(),
             blend_modulate: value.blend_texture.is_some() && value.blend_modulate.is_some(),
             envmap: value.envmap.is_some(),
+            fence: value.lightmap_params.z > 0.,
+            half_lambert: value.lightmap_params.w > 0.5,
+            bumped: value.bump.x > 0.5,
         }
     }
 }
@@ -368,11 +383,40 @@ fn world_material(
         .or_insert_with(|| {
             let mut material = materials.get(base).unwrap().clone();
             material.extension.lightmap = Some(light.clone());
+            let [_, _, fence, half_lambert] = material.extension.lightmap_params.to_array();
             material.extension.lightmap_params =
-                Vec4::new(1., material.base.lightmap_exposure, 0., 0.);
+                Vec4::new(1., material.base.lightmap_exposure, fence, half_lambert);
+            // Bumped lightmaps need the bump map; world meshes carry the
+            // per-vertex basis stride (SOURCE_BUMP).
+            // L4D2R_NO_BUMPED: debug, the flat lightmap only.
+            if material.extension.bump_map.is_some() && std::env::var_os("L4D2R_NO_BUMPED").is_none() {
+                material.extension.bump.x = 1.;
+            }
             materials.add(material)
         })
         .clone()
+}
+/// One lighting-cache cell: the ambient cube and the visible sun.
+fn sample_model_light(
+    world: &crate::bsp::World,
+    shadows: &crate::lighting::WorldShadow,
+    position: Vec3,
+) -> ([[f32; 3]; 6], Vec4, Vec4) {
+    let cube = model_ambient(world, shadows, position);
+    let mut direction = Vec4::ZERO;
+    let mut color = Vec4::ZERO;
+    if let Some(sun) = world.suns.first() {
+        let ray = Vec3::from_array(sun.direction).normalize_or_zero();
+        if !shadows.blocked(position.to_array(), ray.to_array()) {
+            direction = ray.extend(0.);
+            color = Vec3::from_array(sun.intensity).extend(0.);
+        }
+    }
+    (cube, direction, color)
+}
+thread_local! {
+    /// Set inside lighting pool tasks so nested samples stay serial.
+    static IN_LIGHT_POOL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 pub(crate) fn model_ambient(
     world: &crate::bsp::World,
@@ -388,7 +432,34 @@ pub(crate) fn model_ambient(
         Vec3::Y,
         Vec3::NEG_Y,
     ];
+    // Further skylights (the sun is `suns[0]`, applied as the direct light)
+    // add their visible light to the cube, as the engine lights models with
+    // every world light.
+    for sun in world.suns.iter().skip(1) {
+        let direction = Vec3::from_array(sun.direction).normalize_or_zero();
+        if direction == Vec3::ZERO || shadows.blocked(position.to_array(), direction.to_array()) {
+            continue;
+        }
+        let color = Vec3::from_array(sun.intensity);
+        for (face, axis) in axes.iter().enumerate() {
+            let contribution = color * axis.dot(direction).max(0.);
+            for c in 0..3 {
+                cube[face][c] += contribution[c];
+            }
+        }
+    }
+    // The engine's light cache skips world lights outside the sample point's
+    // PVS. Without it every sample shadow-traced lights across the whole map
+    // (c2m2's ~230 fairground lights: ~80 ms for one view-model sample).
+    let here = world.visibility.cluster_at(position);
+    // Cheap tests first; the shadow traces after, across the task pool when
+    // many lights remain and this is not already a pool worker (one camera
+    // jump's view-model sample spent ~37 ms tracing c2m2's lights serially).
+    let mut lit: Vec<(Vec3, Vec3, [f32; 3])> = Vec::new();
     for light in &world.local_lights {
+        if light.cluster >= 0 && !world.visibility.visible(here, &[light.cluster as u16]) {
+            continue;
+        }
         let delta = Vec3::from_array(light.origin) - position;
         let distance = delta.length() / 0.0254;
         if distance < 1. || (light.radius > 0. && distance > light.radius) {
@@ -408,7 +479,33 @@ pub(crate) fn model_ambient(
                 .clamp(0., 1.)
                 .powf(light.exponent.max(1.));
         }
-        if color.max_element() < 0.0005 || shadows.blocked_to(position.to_array(), light.origin) {
+        if color.max_element() < 0.0005 {
+            continue;
+        }
+        lit.push((color, direction, light.origin));
+    }
+    let origin = position.to_array();
+    let visible: Vec<bool> = if lit.len() > 16 && !IN_LIGHT_POOL.with(|f| f.get()) {
+        let pool = bevy::tasks::ComputeTaskPool::get();
+        let chunk = lit.len().div_ceil(pool.thread_num().max(1));
+        pool.scope(|scope| {
+            for part in lit.chunks(chunk) {
+                scope.spawn(async move {
+                    IN_LIGHT_POOL.with(|f| f.set(true));
+                    let out: Vec<bool> = part.iter().map(|(_, _, o)| !shadows.blocked_to(origin, *o)).collect();
+                    IN_LIGHT_POOL.with(|f| f.set(false));
+                    out
+                });
+            }
+        })
+        .into_iter()
+        .flatten()
+        .collect()
+    } else {
+        lit.iter().map(|(_, _, o)| !shadows.blocked_to(origin, *o)).collect()
+    };
+    for ((color, direction, _), visible) in lit.into_iter().zip(visible) {
+        if !visible {
             continue;
         }
         for (face, axis) in axes.iter().enumerate() {
@@ -501,6 +598,71 @@ fn update_model_lighting(
             writes.write(table.buffer.id(),(at*16) as u64,table_bytes(&table.data[at..at+1]));
         }
     }
+    // Many models revealed at once (a map start) each miss the per-cell
+    // cache and sample every local light with a shadow trace: c2m2's reveal
+    // spent ~80 ms in one frame. Gather this frame's missing cells for draws
+    // that will resample, compute them across the task pool, then let the
+    // loop below hit the cache.
+    {
+        let mut missing: Vec<([i32; 3], Vec3)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (_, mesh, transform, layers, _, state, bounds, gpu, _, _) in draws.iter() {
+            if layers.is_some_and(|l| l.intersects(&RenderLayers::layer(2))) {
+                continue;
+            }
+            let center = if gpu.is_some() {
+                bounds.map_or(Vec3::Y * 0.9, |b| Vec3::from(b.center))
+            } else if let Some(center) = state.center {
+                center
+            } else {
+                // New draw: the same mesh-bounds centre the loop caches.
+                let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) = meshes
+                    .get(&mesh.0)
+                    .and_then(|mesh| mesh.attribute(Mesh::ATTRIBUTE_POSITION))
+                else {
+                    continue;
+                };
+                if positions.is_empty() {
+                    continue;
+                }
+                let (lo, hi) = positions.iter().fold(
+                    (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+                    |(lo, hi), p| (lo.min(Vec3::from_array(*p)), hi.max(Vec3::from_array(*p))),
+                );
+                (lo + hi) * 0.5
+            };
+            let position = transform.transform_point(center) + Vec3::Y * 0.04;
+            if state.sample_position.is_some_and(|p| p.distance_squared(position) < 0.09) {
+                continue;
+            }
+            let cell = position.to_array().map(|v| (v / 0.5).floor() as i32);
+            if !cache.contains_key(&cell) && seen.insert(cell) {
+                missing.push((cell, position));
+            }
+        }
+        if missing.len() > 1 && cache.len() + missing.len() <= 8192 {
+            let _timing = crate::performance::scope("model_lighting::parallel_sample");
+            let world = &map.0.world;
+            let shadows = &*shadows;
+            let pool = bevy::tasks::ComputeTaskPool::get();
+            let chunk = missing.len().div_ceil(pool.thread_num().max(1));
+            let results = pool.scope(|scope| {
+                for part in missing.chunks(chunk) {
+                    scope.spawn(async move {
+                        IN_LIGHT_POOL.with(|f| f.set(true));
+                        let out = part.iter()
+                            .map(|&(cell, position)| (cell, sample_model_light(world, shadows, position)))
+                            .collect::<Vec<_>>();
+                        IN_LIGHT_POOL.with(|f| f.set(false));
+                        out
+                    });
+                }
+            });
+            for (cell, light) in results.into_iter().flatten() {
+                cache.insert(cell, light);
+            }
+        }
+    }
     for (entity, mesh, transform, layers, mut material, mut state, bounds, gpu, animated, parent) in &mut draws {
         let appearance = animated.and_then(|draw| appearances.get(draw.root).ok())
             .or_else(|| parent.and_then(|parent| appearances.get(parent.parent()).ok())).copied();
@@ -520,6 +682,7 @@ fn update_model_lighting(
             bounds.map_or(Vec3::Y * 0.9, |b| Vec3::from(b.center))
         } else {
             *state.center.get_or_insert_with(|| {
+                let _timing = crate::performance::scope("model_lighting::center");
                 let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) = meshes
                     .get(&mesh.0)
                     .and_then(|mesh| mesh.attribute(Mesh::ATTRIBUTE_POSITION))
@@ -566,28 +729,18 @@ fn update_model_lighting(
             cache.clear();
         }
         let (cube, sun_direction, sun_color) = *cache.entry(cell).or_insert_with(|| {
-            let cube = model_ambient(&map.0.world, &shadows, position);
-            let mut direction = Vec4::ZERO;
-            let mut color = Vec4::ZERO;
-            if let Some(sun) = map.0.world.suns.first() {
-                let ray = Vec3::from_array(sun.direction).normalize_or_zero();
-                let visible = !shadows.blocked(position.to_array(), ray.to_array());
-                if visible {
-                    direction = ray.extend(0.);
-                    color = Vec3::from_array(sun.intensity).extend(0.);
-                }
-            }
-            (cube, direction, color)
+            let _timing = crate::performance::scope("model_lighting::sample");
+            sample_model_light(&map.0.world, &shadows, position)
         });
-        let mut cube = cube.map(|c| {
-            let value = Vec3::from_array(c);
-            // Readability fill for the separate weapon pass; retain brighter native light.
-            if viewmodel {
-                value.max(Vec3::splat(0.06)).extend(0.)
-            } else {
-                value.extend(0.)
-            }
-        });
+        // The view model takes the same ambient light as world models, with no
+        // fill: in c1m2's dark store retail's pistol is nearly black (live
+        // comparison 19 Nov); it shares the world's tonemap scale now
+        // (native_tonemap::share_world_exposure).
+        // L4D2R_VM_LIGHT: debug, the view model's sampled light.
+        if viewmodel && std::env::var_os("L4D2R_VM_LIGHT").is_some() {
+            println!("L4D2R VM light at {position:?}: cube {cube:?} sun {sun_direction:?} {sun_color:?}");
+        }
+        let mut cube = cube.map(|c| Vec3::from_array(c).extend(0.));
         if let Some(appearance) = appearance {
             cube[0].w = appearance.skin as f32;
             cube[1].w = appearance.cloth as f32;
@@ -756,6 +909,31 @@ impl MaterialExtension for SourceLighting {
                 fragment.shader_defs.push("SOURCE_CAP_PHONG".into());
             }
         }
+        if key.bind_group_data.bumped {
+            let bump_layout = layout.0.get_layout(&[SOURCE_BUMP.at_shader_location(14)])?;
+            if let Some(buffer) = descriptor.vertex.buffers.first_mut() {
+                buffer.attributes.extend(bump_layout.attributes);
+            }
+            descriptor.vertex.shader_defs.push("SOURCE_BUMPED".into());
+            if let Some(fragment) = descriptor.fragment.as_mut() {
+                fragment.shader_defs.push("SOURCE_BUMPED".into());
+            }
+        }
+        if key.bind_group_data.half_lambert {
+            if let Some(fragment) = descriptor.fragment.as_mut() {
+                fragment.shader_defs.push("SOURCE_HALF_LAMBERT".into());
+            }
+        }
+        if key.bind_group_data.fence {
+            // Valve's fence render state: blended, but alpha tested and
+            // depth writing like an opaque cutout.
+            if let Some(depth) = descriptor.depth_stencil.as_mut() {
+                depth.depth_write_enabled = Some(true);
+            }
+            if let Some(fragment) = descriptor.fragment.as_mut() {
+                fragment.shader_defs.push("SOURCE_FENCE".into());
+            }
+        }
         if key.bind_group_data.sky {
             descriptor
                 .vertex
@@ -789,6 +967,7 @@ pub(crate) type SourceMaterial = ExtendedMaterial<StandardMaterial, SourceLighti
 /// its 128x128 tool texture, so it tiled 4x too often).
 pub(crate) fn world_uv(surface: &crate::bsp::Surface, mapping: Option<&[f32; 2]>) -> Vec<[f32; 2]> {
     match mapping {
+        _ if surface.texdata_size == crate::bsp::OVERLAY_UV => surface.uv.clone(),
         Some(size) if *size != surface.texdata_size => {
             let scale = [surface.texdata_size[0] / size[0], surface.texdata_size[1] / size[1]];
             surface.uv.iter().map(|uv| [uv[0] * scale[0], uv[1] * scale[1]]).collect()
@@ -797,6 +976,9 @@ pub(crate) fn world_uv(surface: &crate::bsp::Surface, mapping: Option<&[f32; 2]>
     }
 }
 /// Displacement blend weight (0 = $basetexture, 1 = $basetexture2).
+/// Bumped lightmaps: atlas u distance between basis lightmaps (0: none).
+pub(crate) const SOURCE_BUMP: bevy::mesh::MeshVertexAttribute =
+    bevy::mesh::MeshVertexAttribute::new("Source_Bump", 0x5ce0_b0b9, bevy::render::render_resource::VertexFormat::Float32);
 pub(crate) const SOURCE_BLEND: bevy::mesh::MeshVertexAttribute =
     bevy::mesh::MeshVertexAttribute::new("Source_Blend", 0x5ce0_b1e4, bevy::render::render_resource::VertexFormat::Float32);
 #[cfg(test)]
@@ -812,6 +994,7 @@ mod world_uv_tests {
             uv: vec![[8., 4.]],
             light_uv: vec![],
             blend: vec![],
+            bump: vec![],
             texdata_size: [128., 128.],
         };
         // texdata from the 128x128 tool texture; rockwater is 1024x1024.
@@ -934,6 +1117,8 @@ mod lighting_cache_tests {
                 envmap: None,
                 envmap_tint: Vec4::ZERO,
                 envmap_params: Vec4::ZERO,
+                bump: Vec4::ZERO,
+                bump_map: None,
                 blend_texture: None,
                 blend_modulate: None,
             },
@@ -987,6 +1172,8 @@ mod lighting_cache_tests {
                 envmap: None,
                 envmap_tint: Vec4::ZERO,
                 envmap_params: Vec4::ZERO,
+                bump: Vec4::ZERO,
+                bump_map: None,
                 blend_texture: None,
                 blend_modulate: None,
             },
@@ -1177,9 +1364,17 @@ pub(crate) fn render_plugin() -> bevy::render::RenderPlugin {
 /// Shader values for a material's envmap and the chosen capture.
 fn envmap_values(env: &crate::material::EnvmapSettings, image: Option<Handle<Image>>) -> (Option<Handle<Image>>, Vec4, Vec4) {
     let on = image.is_some();
+    // LightmappedGeneric sets $envmaptint gamma-to-linear
+    // (SetEnvMapTintPixelShaderDynamicState(.., true)). L4D2R_ENVMAP_RAW_TINT:
+    // debug, the authored value as-is.
+    let tint = if std::env::var_os("L4D2R_ENVMAP_RAW_TINT").is_some() {
+        env.tint
+    } else {
+        env.tint.map(|c| c.max(0.).powf(2.2))
+    };
     (
         image,
-        Vec4::new(env.tint[0], env.tint[1], env.tint[2], if on { 1. } else { 0. }),
+        Vec4::new(tint[0], tint[1], tint[2], if on { 1. } else { 0. }),
         Vec4::new(env.saturation, env.contrast, env.base_alpha_mask as u8 as f32, env.normal_alpha_mask as u8 as f32),
     )
 }
@@ -1231,7 +1426,7 @@ pub fn install_game(app: &mut App, scene: Scene, capture: Option<String>) {
     .insert_resource(GameRender)
     .add_systems(Startup, setup.in_set(RenderSetup::Scene))
     .add_systems(PostUpdate, crate::source_sun::update.before(bevy::transform::TransformSystems::Propagate))
-    .add_systems(PostUpdate, crate::native_tonemap::sync)
+    .add_systems(PostUpdate, (crate::native_tonemap::sync, crate::native_tonemap::share_world_exposure))
     .add_systems(PostUpdate, crate::native_fog::sync.after(bevy::transform::TransformSystems::Propagate))
     .add_systems(PostUpdate, crate::color_correction::sync.after(crate::native_fog::sync))
     .add_plugins(crate::engine_post::EnginePostPlugin)
@@ -1640,7 +1835,7 @@ fn sky_image(scene: &Scene) -> Option<Image> {
                 let sy =
                     (uv[1] * texture.height as f32).clamp(0., texture.height as f32 - 1.) as usize;
                 let pixel = &texture.rgba[(sy * texture.width as usize + sx) * 4..][..4];
-                for channel in &pixel[..3] {
+                for (k, channel) in pixel[..3].iter().enumerate() {
                     let c = *channel as f32 / 255.;
                     let value = if material.hdr_compressed {
                         c * pixel[3] as f32 / 255. * 8.
@@ -1649,6 +1844,10 @@ fn sky_image(scene: &Scene) -> Option<Image> {
                     } else {
                         ((c + 0.055) / 1.055).powf(2.4)
                     };
+                    // The Sky shaders multiply by `$color` (c7m1's river_hdr
+                    // is .16: unscaled, its sky was ~6x retail's and held the
+                    // exposure at 2 where retail reaches the map's 9).
+                    let value = value * material.color[k];
                     rgba.extend_from_slice(&half::f16::from_f32(value).to_le_bytes());
                 }
                 rgba.extend_from_slice(&half::f16::from_f32(1.).to_le_bytes());
@@ -1823,7 +2022,8 @@ fn setup(
         let base = used(&|m| (m.shader != "infected" && m.base.as_ref() == Some(&name)) || m.base2.as_ref() == Some(&name) || m.infected_burn.as_ref() == Some(&name)
             || m.palette.as_ref().is_some_and(|(p, _, _)| p == &name));
         let linear = used(&|m| {
-            m.normal.as_ref() == Some(&name) || m.emission_mask.as_ref() == Some(&name)
+            m.normal.as_ref() == Some(&name) || m.bump.as_ref() == Some(&name) || m.emission_mask.as_ref() == Some(&name)
+                || m.cap_phong.as_ref().is_some_and(|c| c.exponent_texture.as_ref() == Some(&name) || c.lightwarp.as_ref() == Some(&name))
                 || (m.shader == "infected" && m.base.as_ref() == Some(&name))
                 || m.infected_detail.as_ref() == Some(&name)
                 || m.wound.as_ref().is_some_and(|w| w.texture == name)
@@ -1889,6 +2089,7 @@ fn setup(
                     Some(bevy::render::render_resource::Face::Back)
                 },
                 alpha_mode: match m.alpha {
+                    _ if m.fence => AlphaMode::Blend,
                     1 => AlphaMode::Mask(m.cutoff),
                     2 => AlphaMode::Blend,
                     3 => AlphaMode::Add,
@@ -1903,7 +2104,14 @@ fn setup(
                 sun_direction: Vec4::ZERO,
                 sun_color: Vec4::ZERO,
                 lightmap: None,
-                lightmap_params: Vec4::ZERO,
+                // z: the fence state's alpha-test reference (SOURCE_FENCE).
+                lightmap_params: Vec4::new(
+                    0.,
+                    0.,
+                    if m.fence { m.cutoff.max(1. / 255.) } else { 0. },
+                    // w: $halflambert (SOURCE_HALF_LAMBERT).
+                    if m.half_lambert { 1. } else { 0. },
+                ),
                 lighting_table: lighting_table.buffer.clone(),
                 wound_rows: [Vec4::ZERO; 12],
                 wound: m.wound.as_ref().map(WoundUniform::from_material).unwrap_or_default(),
@@ -1924,9 +2132,17 @@ fn setup(
                 envmap,
                 envmap_tint,
                 envmap_params,
+                // y: $ssbump; x is set on the lightmapped world copy.
+                bump: Vec4::new(0., if m.ssbump { 1. } else { 0. }, 0., 0.),
+                // Models: the Phong exponent texture shares the slot.
+                bump_map: m.bump.as_ref()
+                    .or_else(|| m.cap_phong.as_ref().and_then(|c| c.exponent_texture.as_ref()))
+                    .and_then(|p| normal.get(p)).cloned(),
                 blend_texture: m.base2.as_ref().and_then(|p| diffuse.get(p)).cloned(),
                 blend_modulate: m.blend_modulate.as_ref().and_then(|p| normal.get(p)).cloned(),
-                emission: m.emission_mask.as_ref().and_then(|p|normal.get(p)).cloned(),
+                emission: m.emission_mask.as_ref()
+                    .or_else(|| m.cap_phong.as_ref().and_then(|c| c.lightwarp.as_ref()))
+                    .and_then(|p|normal.get(p)).cloned(),
                 emission_tint: Vec4::new(m.emission_tint[0],m.emission_tint[1],m.emission_tint[2],if m.emission.is_some() {if m.emission_mask.is_some() {2.} else {1.}} else {0.}),
             },
         });
@@ -1959,6 +2175,11 @@ fn setup(
     let light = images.add(light);
     // Switchable light styles rewrite styled texels in place (keeps CPU data).
     commands.insert_resource(crate::light_styles::Lightmap(light.clone()));
+    for handle in water_handles.values() {
+        if let Some(mut water) = water_materials.get_mut(handle) {
+            water.extension.lightmap = Some(light.clone());
+        }
+    }
     let legacy_lightmap = std::env::args().any(|a| a == "--profile-legacy-lightmap");
     let mut lightmapped = HashMap::new();
     let mut replacement_materials=material_handles.clone();
@@ -1979,6 +2200,12 @@ fn setup(
             scene.materials[&surface.material].uv,
         );
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, surface.light_uv.clone());
+        // Every world mesh carries the stride: a bumped material's pipeline
+        // reads it (0 where a face has no bump lightmaps, e.g. overlays).
+        mesh.insert_attribute(
+            SOURCE_BUMP,
+            if surface.bump.len() == surface.positions.len() { surface.bump.clone() } else { vec![0.; surface.positions.len()] },
+        );
         if scene.materials.get(&surface.material).is_some_and(|m| m.base2.is_some()) {
             mesh.insert_attribute(SOURCE_BLEND, surface.blend.clone());
         }
@@ -2446,6 +2673,7 @@ fn setup(
             readback: exposure_readback.as_ref().map(|r| r.0.clone()),
             speed_brighten: bounds.rate,
             speed_darken: bounds.rate,
+            initial_ev: bounds.initial_ev(),
             ..default()
         },
         crate::native_tonemap::SourceMetering,

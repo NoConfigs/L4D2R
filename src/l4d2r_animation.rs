@@ -1938,6 +1938,42 @@ fn choose(sk: &Skeleton, names: &[&str]) -> Option<usize> {
             })
         })
 }
+/// The view model's item-reach step once the current clip has finished:
+/// extend toward a focused pickup, hold the loop, retract when it is lost,
+/// else the ordinary idle (None).
+#[cfg(test)]
+fn item_reach(activity: &str, focused: bool) -> Option<&'static [&'static str]> {
+    hand_reach(activity, focused, false)
+}
+/// Like `item_reach`, with reviving a teammate taking the helping-hand set
+/// (ACT_VM_HELPINGHAND_EXTEND/LOOP/RETRACT) first.
+fn hand_reach(activity: &str, item: bool, helping: bool) -> Option<&'static [&'static str]> {
+    const ITEM: [&[&str]; 3] = [
+        &["ACT_VM_ITEMPICKUP_EXTEND", "item_extend"],
+        &["ACT_VM_ITEMPICKUP_LOOP", "item_loop"],
+        &["ACT_VM_ITEMPICKUP_RETRACT", "item_retract"],
+    ];
+    const HELP: [&[&str]; 3] = [
+        &["ACT_VM_HELPINGHAND_EXTEND", "helping_hand_extend"],
+        &["ACT_VM_HELPINGHAND_LOOP", "helping_hand_loop"],
+        &["ACT_VM_HELPINGHAND_RETRACT", "helping_hand_retract"],
+    ];
+    let in_item = matches!(activity, "ACT_VM_ITEMPICKUP_EXTEND" | "ACT_VM_ITEMPICKUP_LOOP");
+    let in_help = matches!(activity, "ACT_VM_HELPINGHAND_EXTEND" | "ACT_VM_HELPINGHAND_LOOP");
+    // Leave the other reach first, then start this one.
+    if helping {
+        return Some(if in_item { ITEM[2] } else if in_help { HELP[1] } else { HELP[0] });
+    }
+    if in_help {
+        return Some(HELP[2]);
+    }
+    match (item, in_item) {
+        (true, true) => Some(ITEM[1]),
+        (true, false) => Some(ITEM[0]),
+        (false, true) => Some(ITEM[2]),
+        (false, false) => None,
+    }
+}
 fn reload_sequence(sk: &Skeleton, phase: u8, empty: bool) -> Option<usize> {
     match phase {
         2 => choose(sk, &["ACT_VM_RELOAD_LOOP", "reload_loop"]),
@@ -2111,6 +2147,23 @@ fn skin(draw: &Draw, globals: &HashMap<String, XMat>) -> (Vec<[f32; 3]>, Vec<[f3
 #[cfg(test)]
 mod merge_tests {
     use super::*;
+    #[test]
+    fn item_reach_extends_holds_and_retracts() {
+        assert_eq!(item_reach("ACT_VM_IDLE", false), None);
+        assert_eq!(item_reach("ACT_VM_IDLE", true).unwrap()[0], "ACT_VM_ITEMPICKUP_EXTEND");
+        assert_eq!(item_reach("ACT_VM_ITEMPICKUP_EXTEND", true).unwrap()[0], "ACT_VM_ITEMPICKUP_LOOP");
+        assert_eq!(item_reach("ACT_VM_ITEMPICKUP_LOOP", true).unwrap()[0], "ACT_VM_ITEMPICKUP_LOOP");
+        assert_eq!(item_reach("ACT_VM_ITEMPICKUP_LOOP", false).unwrap()[0], "ACT_VM_ITEMPICKUP_RETRACT");
+        assert_eq!(item_reach("ACT_VM_ITEMPICKUP_RETRACT", false), None);
+        // After a shot (or any other clip) the reach starts over.
+        assert_eq!(item_reach("ACT_VM_PRIMARYATTACK", true).unwrap()[0], "ACT_VM_ITEMPICKUP_EXTEND");
+        // Reviving: the helping hand, after leaving an item reach.
+        assert_eq!(hand_reach("ACT_VM_IDLE", true, true).unwrap()[0], "ACT_VM_HELPINGHAND_EXTEND");
+        assert_eq!(hand_reach("ACT_VM_ITEMPICKUP_LOOP", true, true).unwrap()[0], "ACT_VM_ITEMPICKUP_RETRACT");
+        assert_eq!(hand_reach("ACT_VM_HELPINGHAND_EXTEND", false, true).unwrap()[0], "ACT_VM_HELPINGHAND_LOOP");
+        assert_eq!(hand_reach("ACT_VM_HELPINGHAND_LOOP", false, false).unwrap()[0], "ACT_VM_HELPINGHAND_RETRACT");
+        assert_eq!(hand_reach("ACT_VM_HELPINGHAND_RETRACT", false, false), None);
+    }
     #[test]
     fn transition_libraries_share_models_without_retaining_unused_models() {
         let root = Path::new(r"C:\Program Files (x86)\Steam\steamapps\common\Left 4 Dead 2");
@@ -4813,7 +4866,18 @@ pub fn update(
                 {
                     p.sequence
                 } else {
-                    choose(sk, &["ACT_VM_IDLE", "a_idle_1", "idle", "a_idle", "idle1"]).unwrap_or(0)
+                    // Retail's free hand reaches toward a focused pickup
+                    // (ACT_VM_ITEMPICKUP_EXTEND/LOOP/RETRACT on every weapon
+                    // view model; live retail c1m2/c1m3/c3m1, 19 Nov).
+                    let label = sk
+                        .sequences()
+                        .get(p.sequence)
+                        .map(|s| s.activity_name.as_str())
+                        .unwrap_or("");
+                    hand_reach(label, state.hint.contains("Pick up"), state.reviving.is_some())
+                        .and_then(|names| choose(sk, names))
+                        .or_else(|| choose(sk, &["ACT_VM_IDLE", "a_idle_1", "idle", "a_idle", "idle1"]))
+                        .unwrap_or(0)
                 }
             }
         // Hanging from a ledge (online players): the grab, the stage's hang
@@ -5783,7 +5847,9 @@ pub fn update(
         let dying = roots.get(draw.root).is_ok_and(|r| {
             r.2.is_some_and(|c| squad.0[c.0].state.dead) || r.3.is_some_and(|e| e.health <= 0.)
         });
-        if cpu_skin && !visible.get() && !dying {
+        // GPU skinning too: writing ~100 joint transforms per hidden actor
+        // each frame (c4m3's start: ~3,400) dominated transform propagation.
+        if !visible.get() && !dying {
             continue;
         }
         if let (Some(model), Some(pose)) = (library.models.get(&draw.model), poses.get(&draw.root))

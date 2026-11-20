@@ -168,15 +168,8 @@ impl Delivery {
         }
         self.elapsed += dt.max(0.);
         state.action = (duration - self.elapsed).max(0.);
-        state.hint = format!(
-            "{} : {:.0}%",
-            if gas {
-                "Pouring fuel"
-            } else {
-                "Delivering cola"
-            },
-            (self.elapsed / duration * 100.).min(100.)
-        );
+        // The use bar (progress_bar, medical_kind 10) shows the progress.
+        state.hint.clear();
         if self.elapsed + 1e-5 >= duration {
             if !gas {
                 self.completed.insert(id);

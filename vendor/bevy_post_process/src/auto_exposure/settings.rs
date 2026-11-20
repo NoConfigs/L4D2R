@@ -92,6 +92,18 @@ pub struct AutoExposure {
     /// L4D2 rewrite patch: when set, the view's adapted exposure (EV, f32)
     /// is copied into this buffer after metering, for a CPU readback.
     pub readback: Option<Handle<bevy_render::storage::ShaderBuffer>>,
+
+    /// L4D2 rewrite patch: the adapted exposure (EV) a new view starts at
+    /// (Source resets its tonemap scale on level start instead of EV 0).
+    pub initial_ev: f32,
+
+    /// L4D2 rewrite patch: Source's mat_tonemap_min_avglum floor (a
+    /// fraction, 0 = off). The target exposure is raised so the median
+    /// metered luminance reaches at least this value (client 101c6560).
+    pub min_average_luminance: f32,
+
+    /// L4D2 rewrite patch: highest target exposure (EV) the floor may reach.
+    pub max_ev: f32,
 }
 
 impl Default for AutoExposure {
@@ -105,6 +117,9 @@ impl Default for AutoExposure {
             metering_mask: default(),
             compensation_curve: default(),
             readback: None,
+            initial_ev: 0.0,
+            min_average_luminance: 0.0,
+            max_ev: 32.0,
         }
     }
 }

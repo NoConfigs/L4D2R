@@ -715,6 +715,11 @@ impl Body {
         self.sleeping
     }
     pub fn pose(&self, root: &Transform) -> Vec<XMat> {
+        // Draw rigid bodies at the present moment: carry the last solved state
+        // forward by the time not yet simulated (under one 60 Hz step, or up
+        // to two when the shared budget deferred this body). Without it a
+        // horde's corpses froze on skipped frames and then jumped.
+        let ahead = if self.sleeping { 0. } else { self.accumulator.clamp(0., MAX_SUBSTEPS as f32 / 60.) };
         let mut world = Vec::<Mat4>::with_capacity(self.original.len());
         for i in 0..self.original.len() {
             if let Some(p) = self.map[i] {
@@ -722,10 +727,12 @@ impl Body {
                     let b = &rigid.bodies[p];
                     debug_assert_eq!(b.bone, i);
                     let scale = self.original[i].to_scale_rotation_translation().0;
+                    let rotation = (Quat::from_scaled_axis(b.angular * ahead) * b.rotation).normalize();
+                    let position = b.position + b.velocity * ahead;
                     world.push(Mat4::from_scale_rotation_translation(
                         scale,
-                        b.rotation,
-                        b.position - b.rotation * b.center,
+                        rotation,
+                        position - rotation * b.center,
                     ));
                     continue;
                 }
@@ -1428,7 +1435,12 @@ mod tests {
 /// Ragdoll and gib solver steps allowed per rendered frame, shared by every
 /// caller. Each awake body costs about 1 ms per step; without a budget a
 /// horde's corpses all solved in the same frames and caused 30-140 ms hitches.
+/// Desktop runs the steps on four workers, so it affords twice the phones'
+/// budget; with only 8 a dying horde's corpses each moved every few frames.
+#[cfg(any(target_os = "ios", target_os = "android"))]
 pub const FRAME_STEP_BUDGET: u32 = 8;
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+pub const FRAME_STEP_BUDGET: u32 = 16;
 // Unlimited until the game's `First` refill runs, so tools and tests that
 // step bodies directly are never throttled.
 static BUDGET: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
@@ -1478,14 +1490,14 @@ mod shared_budget_tests {
     use super::*;
     #[test]
     fn busy_corpses_cannot_spend_the_gib_reservation_or_expand_the_frame_budget() {
-        let mut value = FRAME_STEP_BUDGET | (4 << 16);
+        let mut value = 8 | (4 << 16);
         for _ in 0..2 { value = claim_steps(value, 2, false).unwrap(); }
         assert!(claim_steps(value, 2, false).is_none());
         for _ in 0..2 { value = claim_steps(value, 2, true).unwrap(); }
         assert_eq!(value, 0);
         assert!(claim_steps(value, 1, true).is_none());
         // With no competing corpses, gibs can use the entire frame budget.
-        let mut value = FRAME_STEP_BUDGET | (4 << 16);
+        let mut value = 8 | (4 << 16);
         for _ in 0..4 { value = claim_steps(value, 2, true).unwrap(); }
         assert_eq!(value, 0);
         assert_eq!(claim_steps(u32::MAX, 2, false), Some(u32::MAX));

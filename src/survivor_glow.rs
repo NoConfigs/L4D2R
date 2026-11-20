@@ -324,6 +324,7 @@ fn sync(
                 &crate::game::Pickup,
                 Option<&crate::loot::Stock>,
                 Option<&crate::loot::PickupMapEntity>,
+                Option<&crate::loot::PickupInside>,
             ),
             Without<crate::game::Taken>,
         >,
@@ -533,7 +534,7 @@ fn sync(
         let _timing = crate::performance::scope("glow::pickup_target");
         pickups
             .iter()
-            .filter_map(|(entity, pickup, stock, binding)| {
+            .filter_map(|(entity, pickup, stock, binding, inside)| {
                 scanned += 1;
                 if !enabled
                     || stock.is_some_and(|s| s.remaining == 0)
@@ -550,10 +551,15 @@ fn sync(
                     || {
                         traces += 1;
                         let target = pickup.origin + Vec3::Y * 0.12;
+                        // Items inside a prop (a health cabinet's pills) ignore
+                        // that prop, like the use trace (game::interact): the
+                        // cabinet's collision encloses them, so they never glowed.
                         binding
+                            .map(|b| b.0)
+                            .or_else(|| inside.map(|i| i.0))
                             .map_or_else(
                                 || collision.sight_trace(eye, target),
-                                |b| collision.prop_trace(b.0, eye, target, Vec3::ZERO),
+                                |owner| collision.prop_trace(owner, eye, target, Vec3::ZERO),
                             )
                             .fraction
                     },
@@ -1043,6 +1049,16 @@ fn map_highlights(logic: &crate::l4d2r_cinematic::MapLogic, eye: Vec3) -> std::c
                 {
                     highlighted.insert(id);
                 }
+            }
+            // A closed health cabinet takes the use-glow in use range, like a
+            // button (live retail c1m2, 19 Nov); opening it ends the glow.
+            if e.me.classname == "prop_health_cabinet"
+                && !logic.world.cine.anims.contains_key(&id)
+                && logic
+                    .bounds(id)
+                    .is_some_and(|(lo, hi)| eye.distance(eye.clamp(lo, hi)) < 2.44)
+            {
+                highlighted.insert(id);
             }
             // Saferoom doors take the item use-glow while a survivor is in
             // use range (96 units), like nearby buttons.

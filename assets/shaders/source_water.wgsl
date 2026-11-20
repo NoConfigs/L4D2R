@@ -27,6 +27,9 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(115) var<uniform> flags: vec4<f32>;
 struct SourceLight { cube: array<vec4<f32>,6>, sun_direction: vec4<f32>, sun_color: vec4<f32> }
 @group(#{MATERIAL_BIND_GROUP}) @binding(116) var<storage, read> lighting_table: array<SourceLight>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(117) var lightmap: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(118) var lightmap_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(119) var<uniform> lightmap_fog: vec4<f32>;
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
@@ -63,6 +66,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let reflection_direction = reflect(-eye, reflection_normal) * vec3(1.0, 1.0, -1.0);
     let reflection = textureSample(sky_map, sky_sampler, reflection_direction).rgb * reflect_params.rgb;
     var body = water_fog.rgb * view.exposure;
+#ifdef WATER_LIGHTMAP_FOG
+#ifdef VERTEX_UVS_B
+    // $lightmapwaterfog: the fog volume is lit by the surface's lightmap.
+    body *= textureSampleLevel(lightmap, lightmap_sampler, in.uv_b, 0.0).rgb;
+#endif
+#endif
     var depth_factor = 1.0;
     if flags.z > 0.5 {
         let screen_uv = (in.position.xy - view.viewport.xy) / view.viewport.zw;

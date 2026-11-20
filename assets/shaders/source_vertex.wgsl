@@ -41,6 +41,9 @@ struct SourceVertexOutput {
 #ifdef SOURCE_BLEND
     @location(13) source_blend: f32,
 #endif
+#ifdef SOURCE_BUMPED
+    @location(14) source_bump: f32,
+#endif
     // This is `clip position` when the struct is used as a vertex stage output
     // and `frag coord` when used as a fragment stage input
     @builtin(position) position: vec4<f32>,
@@ -86,10 +89,16 @@ fn vertex(vertex_no_morph: Vertex
 #ifdef SOURCE_BLEND
     , @location(13) source_blend: f32
 #endif
+#ifdef SOURCE_BUMPED
+    , @location(14) source_bump: f32
+#endif
 ) -> SourceVertexOutput {
     var out: SourceVertexOutput;
 #ifdef SOURCE_BLEND
     out.source_blend = source_blend;
+#endif
+#ifdef SOURCE_BUMPED
+    out.source_bump = source_bump;
 #endif
 #ifdef SOURCE_GLASS_MASK
     out.glass_mask_uv = glass_mask_uv;

@@ -17,6 +17,8 @@ pub struct ProgressFill;
 pub struct ProgressTitle;
 #[derive(Component)]
 pub struct ProgressSubtext;
+#[derive(Component)]
+pub struct ProgressIcon;
 
 /// Full width of the "Bar" panel (ProgressBar.res).
 const BAR_WIDE: f32 = 227.;
@@ -92,6 +94,7 @@ pub fn spawn(
             ..ImageNode::new(image("hud/iconsheet"))
         },
         at(9., 10., 25., 24.),
+        ProgressIcon,
         ChildOf(root),
     ));
     // BarLabel: 39,7 290x12, west, MenuTitle_DropShadow (Stubble bold 18,
@@ -161,6 +164,18 @@ pub fn content(
                     p,
                 )
             }),
+            // Carried use targets (carryables::Delivery): retail client
+            // #L4D_progress_using_gas_can / _using_cola_bottles_alt1.
+            10 => Some((
+                if state.carried.as_deref() == Some("weapon_gascan") {
+                    "POURING FUEL"
+                } else {
+                    "DELIVERING COLA BOTTLES"
+                }
+                .into(),
+                String::new(),
+                p,
+            )),
             // Pills (5) and adrenaline (4) have no progress bar in retail.
             _ => None,
         };
@@ -208,7 +223,14 @@ pub fn update(
         (&mut Text, Has<ProgressTitle>),
         Or<(With<ProgressTitle>, With<ProgressSubtext>)>,
     >,
+    mut icons: Query<&mut Visibility, (With<ProgressIcon>, Without<ProgressRoot>)>,
 ) {
+    // Retail draws the healing icon for medical uses only: delivering cola
+    // or pouring fuel shows just the bar and its title.
+    let icon = if state.medical_kind == 10 { Visibility::Hidden } else { Visibility::Inherited };
+    for mut visibility in &mut icons {
+        visibility.set_if_neq(icon);
+    }
     let names: Vec<&'static str> = session
         .as_ref()
         .map(|s| {
@@ -353,5 +375,13 @@ mod tests {
             s.medical_kind = kind;
             assert!(content(&s, &squad(), |_| "Nick".into()).is_none());
         }
+        // Delivering the c1m2 cola and pouring gas show the use bar.
+        s.medical_kind = 10;
+        s.carried = Some("weapon_cola_bottles".into());
+        let (title, _, p) = content(&s, &squad(), |_| "Nick".into()).unwrap();
+        assert_eq!(title, "DELIVERING COLA BOTTLES");
+        assert!((p - 0.5).abs() < 1e-5);
+        s.carried = Some("weapon_gascan".into());
+        assert_eq!(content(&s, &squad(), |_| "Nick".into()).unwrap().0, "POURING FUEL");
     }
 }

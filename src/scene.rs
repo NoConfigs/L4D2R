@@ -312,7 +312,7 @@ impl Scene {
         if self.materials.contains_key(name) {return Ok(());}
         let mut material=material::load(assets,name)?;
         material::prepare_palette(assets,&mut material,&mut self.textures)?;
-        for texture in material.base.iter().chain(material.base2.iter()).chain(material.normal.iter()).chain(material.wound.iter().map(|w|&w.texture)).chain(material.infected_detail.iter()).chain(material.infected_burn.iter()) {
+        for texture in material.base.iter().chain(material.base2.iter()).chain(material.normal.iter()).chain(material.bump.iter()).chain(material.cap_phong.iter().filter_map(|c| c.exponent_texture.as_ref())).chain(material.cap_phong.iter().filter_map(|c| c.lightwarp.as_ref())).chain(material.wound.iter().map(|w|&w.texture)).chain(material.infected_detail.iter()).chain(material.infected_burn.iter()) {
             if !self.textures.contains_key(texture) {self.textures.insert(texture.clone(),vtf::decode_world(&assets.read(texture)?,1024)?);}
         }
         self.materials.insert(name.into(),material);Ok(())
@@ -360,7 +360,7 @@ impl Scene {
                 }
                 let mut material = material::load(&mut assets, &draw.material)?;
                 material::prepare_palette(&mut assets, &mut material, &mut self.textures)?;
-                for texture in material.base.iter().chain(material.base2.iter()).chain(material.normal.iter()).chain(material.wound.iter().map(|w| &w.texture)).chain(material.infected_detail.iter()).chain(material.infected_burn.iter()) {
+                for texture in material.base.iter().chain(material.base2.iter()).chain(material.normal.iter()).chain(material.bump.iter()).chain(material.cap_phong.iter().filter_map(|c| c.exponent_texture.as_ref())).chain(material.cap_phong.iter().filter_map(|c| c.lightwarp.as_ref())).chain(material.wound.iter().map(|w| &w.texture)).chain(material.infected_detail.iter()).chain(material.infected_burn.iter()) {
                     if !self.textures.contains_key(texture) {
                         self.textures
                             .insert(texture.clone(), vtf::decode_world(&assets.read(texture)?, 1024)?);
@@ -606,7 +606,7 @@ impl Scene {
             {
                 scene.report.push(format!("INFECTED MATERIAL {name}: {e}"));
             }
-            for path in material.base.iter().chain(material.base2.iter()).chain(material.blend_modulate.iter()).chain(material.normal.iter()).chain(material.emission_mask.iter()).chain(material.wound.iter().map(|w| &w.texture)).chain(material.water.iter().flat_map(|w| w.textures())).chain(material.infected_detail.iter()).chain(material.infected_burn.iter()) {
+            for path in material.base.iter().chain(material.base2.iter()).chain(material.blend_modulate.iter()).chain(material.normal.iter()).chain(material.bump.iter()).chain(material.cap_phong.iter().filter_map(|c| c.exponent_texture.as_ref())).chain(material.cap_phong.iter().filter_map(|c| c.lightwarp.as_ref())).chain(material.emission_mask.iter()).chain(material.wound.iter().map(|w| &w.texture)).chain(material.water.iter().flat_map(|w| w.textures())).chain(material.infected_detail.iter()).chain(material.infected_burn.iter()) {
                 if scene.textures.contains_key(path) {
                     continue;
                 }
