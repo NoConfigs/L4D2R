@@ -380,6 +380,16 @@ pub(crate) fn execute(
         "noclip"=>{if state.noclip {match collision.supported_spawn_near(body.feet,HEIGHT){Ok(p)=>body.feet=p,Err(_)=>return "Cannot leave noclip inside solid geometry; fly into clear space first.".into()}}state.noclip=!state.noclip;body.velocity=Vec3::ZERO;format!("noclip {}",state.noclip)},
         "flashlight"=>{state.flashlight=!state.flashlight;format!("flashlight {}",state.flashlight)},
         "director_force_panic_event"=>{state.panic=true;"Panic event".into()},
+        "bot_setpos" => {
+            let values = words.iter().skip(2).map(|s| s.parse::<f32>()).collect::<Result<Vec<_>, _>>();
+            match (words.get(1), values) {
+                (Some(name), Ok(v)) if (v.len() == 3 || v.len() == 4) && v.iter().all(|f| f.is_finite()) => {
+                    crate::game_state::BOT_PLACEMENTS.lock().unwrap().push((name.to_ascii_lowercase(), [v[0], v[1], v[2]], v.get(3).copied().unwrap_or(f32::NAN)));
+                    format!("bot_setpos {name}: queued")
+                }
+                _ => "Usage: bot_setpos <survivor> x y z [yaw] (Source units)".into(),
+            }
+        }
         "sb_stop" => match words.get(1) {
             None => format!("\"sb_stop\" = \"{}\"", crate::game_state::bots_stopped() as u8),
             Some(value) => match value.to_ascii_lowercase().as_str() {

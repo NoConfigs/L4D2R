@@ -1801,6 +1801,16 @@ pub fn update(
                 .min(d.max.saturating_sub(batch.particles.len()))
                 .min(particle_budget(total,e.me.targetname.starts_with("__rewrite_muzzle_fp_")));
             batch.credit = (batch.credit - count as f32).min(24.);
+            // A long unseen interval (the map runs its skipped intro before
+            // the first rendered frame) used to spawn its whole backlog at
+            // age 0: c5m1's riverboat smoke was 32 same-age sprites in one
+            // dense blob where retail, emitting every frame, shows a column.
+            // Give backlog births the ages they would have had.
+            let backlog = if emission_dt > 0.5 && d.burst == 0 && !e.me.targetname.starts_with("__rewrite_muzzle_fp_") {
+                emission_dt
+            } else {
+                0.
+            };
             for particle_index in 0..count {
                 let rng = &mut effects.rng;
                 let highest = batch.controls.len();
@@ -2127,6 +2137,27 @@ pub fn update(
                         })
                     }),
                 });
+                if backlog > 0. {
+                    if let Some(p) = batch.particles.last_mut() {
+                        // Births spread evenly over the part of the backlog
+                        // that could still be alive.
+                        let t = backlog.min(p.life * 0.98) * (particle_index as f32 + 0.5) / count as f32;
+                        let g = Vec3::from_array(binary::source_position(d.gravity.to_array()));
+                        // Movement Basic: v *= (1 - drag)^(30 dt), then + g dt.
+                        let k = if d.drag > 0. { -30. * (1. - d.drag).max(1e-6).ln() } else { 0. };
+                        let v0 = p.velocity;
+                        let (offset, v) = if k > 1e-4 {
+                            let e = (-k * t).exp();
+                            (g * t / k + (v0 - g / k) * (1. - e) / k, g / k + (v0 - g / k) * e)
+                        } else {
+                            (v0 * t + g * (0.5 * t * t), v0 + g * t)
+                        };
+                        p.age += t;
+                        p.position += offset;
+                        p.velocity = v;
+                        p.previous_position = p.position - v * dt;
+                    }
+                }
                 total += 1;
             }
         }

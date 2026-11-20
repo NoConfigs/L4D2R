@@ -359,6 +359,10 @@ static BOTS_STOPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 pub fn bots_stopped() -> bool {
     BOTS_STOPPED.load(std::sync::atomic::Ordering::Relaxed)
 }
+/// `bot_setpos <survivor> x y z [yaw]` requests (Source units/degrees),
+/// applied by the bot update: matched parity captures need bots on exact
+/// spots.
+pub static BOT_PLACEMENTS: std::sync::Mutex<Vec<(String, [f32; 3], f32)>> = std::sync::Mutex::new(Vec::new());
 #[cfg(not(test))]
 pub fn set_bots_stopped(stopped: bool) {
     BOTS_STOPPED.store(stopped, std::sync::atomic::Ordering::Relaxed);

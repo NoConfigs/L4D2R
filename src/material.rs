@@ -161,7 +161,8 @@ impl CapPhongSettings {
         let tint = vector("$phongtint", [1.; 3]);
         // A light warp needs the emission slot; self-illuminated materials
         // keep the old path.
-        let lightwarp = texture_path(v.get("$lightwarptexture"));
+        // L4D2R_NO_LIGHTWARP: debug, plain Phong diffuse on light-warp heads.
+        let lightwarp = texture_path(v.get("$lightwarptexture")).filter(|_| std::env::var_os("L4D2R_NO_LIGHTWARP").is_none());
         if lightwarp.is_some() && v.get("$selfillum").is_some_and(|s| s == "1") {
             return None;
         }

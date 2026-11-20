@@ -5032,6 +5032,23 @@ fn squad_ai(
             }
             continue;
         }
+        {
+            // bot_setpos: survivor name -> model character.
+            let mut placements = crate::game_state::BOT_PLACEMENTS.lock().unwrap();
+            let character = |n: &str| match n {
+                "rochelle" => "producer", "coach" => "coach", "nick" => "gambler", "ellis" => "mechanic",
+                "bill" => "namvet", "zoey" => "teenangst", "louis" => "manager", "francis" => "biker", _ => "",
+            };
+            if let Some(i) = placements.iter().position(|(n, _, _)| !character(n).is_empty() && member.model.contains(character(n))) {
+                let (_, p, yaw) = placements.remove(i);
+                member.position = Vec3::from_array(binary::source_position(p));
+                if yaw.is_finite() {
+                    let r = yaw.to_radians();
+                    member.aim = Vec3::from_array(binary::source_position([r.cos(), r.sin(), 0.])).normalize_or(member.aim);
+                }
+                positions[index].0 = member.position;
+            }
+        }
         if member.state.action > 0. {
             recovery.reset(index);
             continue;
