@@ -160,6 +160,10 @@ struct DispTri {
     mins: Vec3,
     maxs: Vec3,
     contents: u32,
+    /// Hammer "no hull collision": box traces (player/NPC movement) pass.
+    no_hull: bool,
+    /// Hammer "no ray collision": point traces (bullets, sight) pass.
+    no_ray: bool,
 }
 
 #[derive(Clone)]
@@ -171,7 +175,7 @@ struct DispSet {
 impl DispSet {
     fn build(bsp: &Bsp) -> DispSet {
         let mut tris = Vec::new();
-        for (contents, [a, b, c]) in bsp.displacement_triangles() {
+        for (contents, flags, [a, b, c]) in bsp.displacement_triangles_with_flags() {
             let n = (b - a).cross(c - a);
             if n.length_squared() < 1e-6 {
                 continue;
@@ -209,6 +213,8 @@ impl DispSet {
                 mins: mins.min(a.min(b).min(c)),
                 maxs,
                 contents: contents as u32,
+                no_hull: flags & 4 != 0,
+                no_ray: flags & 8 != 0,
             });
         }
         let mut grid: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
@@ -1678,6 +1684,12 @@ impl Tracer {
                     let t = &self.disp.tris[ti as usize];
                     if t.contents & w.mask == 0 || t.mins.cmpgt(hi).any() || t.maxs.cmplt(lo).any()
                     {
+                        continue;
+                    }
+                    // c13m1's creek water surface is a displacement flagged
+                    // no hull / no ray collision: survivors wade through it.
+                    let point = w.mins == Vec3::ZERO && w.maxs == Vec3::ZERO;
+                    if (point && t.no_ray) || (!point && t.no_hull) {
                         continue;
                     }
                     if w.start == w.end {

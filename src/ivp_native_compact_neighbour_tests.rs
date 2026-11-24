@@ -28,11 +28,11 @@ impl Constructor<'_>{
  }
 }
 impl Lifecycle for Constructor<'_>{
- fn created(&mut self,entry:&mut Entry<'_>,convexes:[&l4d2_formats::phy::Convex;2],budgets:[crate::ivp_hull_budget::Budget;2],motion:[crate::ivp_minimizer::owner::Properties;2],bodies:&mut[Body;2],cache:&mut WorldCache)->Result<crate::ivp_surface_admission::contacts::discovery::Created,&'static str>{
-  let id=self.owner.graph.register(entry.key.slots)?;let far=self.initialize(id,entry,convexes,budgets,motion,bodies,cache)?;Ok(crate::ivp_surface_admission::contacts::discovery::Created{id,far})
+ fn created(&mut self,entry:&mut Entry<'_>,convexes:[&l4d2_formats::phy::Convex;2],input:crate::ivp_surface_admission::contacts::discovery::CreationInput,bodies:&mut[Body;2],cache:&mut WorldCache)->Result<crate::ivp_surface_admission::contacts::discovery::Created,&'static str>{
+  let id=self.owner.graph.register(entry.key.slots)?;let far=self.initialize(id,entry,convexes,input.budgets,input.properties,bodies,cache)?;Ok(crate::ivp_surface_admission::contacts::discovery::Created{id,far,descendants:vec![]})
  }
  fn reactivated(&mut self,id:usize,entry:&mut Entry<'_>,convexes:[&l4d2_formats::phy::Convex;2],budgets:[crate::ivp_hull_budget::Budget;2],motion:[crate::ivp_minimizer::owner::Properties;2],bodies:&mut[Body;2],cache:&mut WorldCache)->Result<Option<crate::ivp_surface_admission::contacts::discovery::FarRegistration>,&'static str>{self.initialize(id,entry,convexes,budgets,motion,bodies,cache)}
- fn retired(&mut self,id:usize,_:&mut Entry<'_>)->Result<(),&'static str>{self.owner.with_queue(self.queue,|owner|owner.retire(id))}
+ fn retired(&mut self,id:usize,_:&mut Entry<'_>,_:&[crate::ivp_surface_admission::contacts::recursion::construction::Binding])->Result<(),&'static str>{self.owner.with_queue(self.queue,|owner|owner.retire(id))}
 }
 
 fn f(v:&Value)->f32{f32::from_bits(v.as_u64().unwrap() as u32)}
@@ -80,9 +80,14 @@ fn check(discover:bool,cases:Cases){
  let system_bank=|w:&crate::ivp_registered_contacts::ContactWorld|json!((1..=3).map(|object|w.contacts().material_system_snapshot(object)).collect::<Vec<_>>());
  let rest=matches!(cases,Cases::OwnedRest|Cases::OwnedMaterial|Cases::OwnedLiveMaterial|Cases::OwnedLiveRegistry|Cases::OwnedObjectMaterial|Cases::OwnedMaterialAssign);let materials=matches!(cases,Cases::OwnedMaterial|Cases::OwnedLiveMaterial|Cases::OwnedLiveRegistry|Cases::OwnedObjectMaterial|Cases::OwnedMaterialAssign);let dispatch=cases==Cases::Dispatch;let impact=matches!(cases,Cases::Impact|Cases::Dispatch);let warm=cases!=Cases::Startup;let motion=matches!(cases,Cases::Velocity|Cases::Impact|Cases::Dispatch|Cases::Prediction|Cases::Far|Cases::Collision|Cases::OwnedCollision|Cases::OwnedImpactWake|Cases::OwnedSleep|Cases::OwnedRewake|Cases::OwnedRest|Cases::OwnedMaterial|Cases::OwnedLiveMaterial|Cases::OwnedLiveRegistry|Cases::OwnedObjectMaterial|Cases::OwnedMaterialAssign);
  let data:Value=serde_json::from_str(match cases{Cases::OwnedLiveMaterial=>include_str!("../tools/fixtures/native-ivp-compact-live-material.json"),Cases::OwnedMaterialAssign=>include_str!("../tools/fixtures/native-ivp-compact-material-assign.json"),Cases::OwnedObjectMaterial=>include_str!("../tools/fixtures/native-ivp-compact-object-material.json"),Cases::OwnedLiveRegistry=>include_str!("../tools/fixtures/native-ivp-compact-live-registry.json"),Cases::OwnedMaterial=>include_str!("../tools/fixtures/native-ivp-compact-material-stack.json"),Cases::OwnedRest=>include_str!("../tools/fixtures/native-ivp-compact-rest.json"),Cases::OwnedRewake=>include_str!("../tools/fixtures/native-ivp-compact-rewake.json"),Cases::OwnedSleep=>include_str!("../tools/fixtures/native-ivp-compact-sleep.json"),Cases::OwnedImpactWake=>include_str!("../tools/fixtures/native-ivp-compact-impact-wake.json"),Cases::OwnedCollision=>include_str!("../tools/fixtures/native-ivp-compact-collision.json"),Cases::Collision=>include_str!("../tools/fixtures/native-ivp-compact-collision.json"),Cases::Far=>include_str!("../tools/fixtures/native-ivp-compact-far-world.json"),Cases::Prediction=>include_str!("../tools/fixtures/native-ivp-compact-prediction.json"),Cases::Dispatch=>include_str!("../tools/fixtures/native-ivp-compact-postimpact.json"),Cases::Impact=>include_str!("../tools/fixtures/native-ivp-compact-impact.json"),Cases::Velocity=>include_str!("../tools/fixtures/native-ivp-compact-wake-motion.json"),Cases::Epochs=>include_str!("../tools/fixtures/native-ivp-compact-wake-epochs.json"),Cases::Startup=>include_str!("../tools/fixtures/native-ivp-compact-wake-neighbour.json")}).unwrap();
+ // Explicit diagnostic override exercises the pending public compound target;
+ // ordinary committed fixtures and their assertions remain the default suite.
+ let compound_input=(cases==Cases::OwnedMaterialAssign).then(||std::env::var_os("L4D2R_COMPOUND_WORLD_INPUT")).flatten();
+ let data=if let Some(path)=&compound_input{let text=std::fs::read_to_string(path).unwrap();let start=text.find("{\"material_texts\"").expect("native compound JSON header");serde_json::Deserializer::from_str(&text[start..]).into_iter::<Value>().next().unwrap().unwrap()}else{data};
+ let compound=compound_input.is_some();
  let hex=data["shape"].as_str().unwrap();let bytes=(0..hex.len()).step_by(2).map(|i|u8::from_str_radix(&hex[i..i+2],16).unwrap()).collect::<Vec<_>>();
  let mut serialized=(bytes.len() as u32).to_le_bytes().to_vec();serialized.extend(bytes);
- let solids=l4d2_formats::phy::parse_collision(&serialized,1).unwrap();assert_eq!(solids[0].convexes.len(),1);let mut merged=0;let mut branches=[0usize;3];let mut original_delta_distinctions=0usize;let mut collisions=0usize;let mut target_wakes=0usize;
+ let solids=l4d2_formats::phy::parse_collision(&serialized,1).unwrap();if compound{assert!(solids[0].convexes.len()>1);}else{assert_eq!(solids[0].convexes.len(),1);}let mut merged=0;let mut branches=[0usize;3];let mut original_delta_distinctions=0usize;let mut collisions=0usize;let mut target_wakes=0usize;
  let shared_material_table=crate::ivp_material_backend::WorldMaterialTable::default();
  for case in data["cases"].as_array().unwrap(){
   let mut material_solid=solids[0].clone();
@@ -243,11 +248,11 @@ fn check(discover:bool,cases:Cases){
     if cases==Cases::OwnedMaterialAssign{for update in case["material_assignments"].as_array().unwrap(){if update["iteration"].as_u64()==Some(iteration){
      assert_eq!(json!(world.bodies().iter().copied().map(crate::ivp_joint_apply::tests::snapshot).collect::<Vec<_>>()),bank(&update["before"]),"case{} before material assignment",case["id"]);
      let expected_systems=material_systems["cases"][case["id"].as_u64().unwrap() as usize]["updates"].as_array().unwrap().iter().find(|u|u["iteration"].as_u64()==Some(iteration)).unwrap();
-     assert_eq!(system_bank(&world),expected_systems["before_systems"],"case{} iteration{iteration} before material systems",case["id"]);
+     if !compound{assert_eq!(system_bank(&world),expected_systems["before_systems"],"case{} iteration{iteration} before material systems",case["id"]);}
      let cache_before=(case["id"]==5&&iteration==20&&std::env::var_os("L4D2R_TRACE_MATERIAL_CACHE").is_some()).then(||coupled.snapshot());
      let noop=(iteration==16).then(||(crate::ivp_registered_contacts::snapshot(&world),coupled.snapshot()));
      coupled.assign_material(&mut world,update["actor"].as_u64().unwrap()+1,update["index"].as_i64().unwrap() as i32).unwrap();
-     assert_eq!(system_bank(&world),expected_systems["after_systems"],"case{} iteration{iteration} after material systems",case["id"]);
+     if !compound{assert_eq!(system_bank(&world),expected_systems["after_systems"],"case{} iteration{iteration} after material systems",case["id"]);}
      if let Some((physical,owner))=noop{assert_eq!(crate::ivp_registered_contacts::snapshot(&world),physical);assert_eq!(coupled.snapshot(),owner);}
      if let Some(before)=cache_before{std::fs::write(std::env::var_os("L4D2R_TRACE_MATERIAL_CACHE").unwrap(),serde_json::to_vec(&json!({"before":before,"after":coupled.snapshot(),"clock":format!("{:?}",world.clock())})).unwrap()).unwrap();}
 
@@ -346,7 +351,7 @@ fn check(discover:bool,cases:Cases){
    if cases==Cases::OwnedImpactWake&&dormant_target&&world.bodies()[1].object_flags&255!=8{target_wakes+=1;}
    (discovery,compact,cache)=coupled.into_parts();
    assert_eq!(world.clock.now.to_bits(),case["prediction_now"].as_u64().unwrap());assert_eq!(world.clock.deadline.to_bits(),case["prediction_deadline"].as_u64().unwrap());assert_eq!(world.clock.clock_serial as u64,case["prediction_frame"].as_u64().unwrap());
-   if cases==Cases::OwnedMaterialAssign{assert_eq!(system_bank(&world),material_systems["cases"][case["id"].as_u64().unwrap() as usize]["post_systems"],"case{} final material systems",case["id"]);}
+   if cases==Cases::OwnedMaterialAssign&&!compound{assert_eq!(system_bank(&world),material_systems["cases"][case["id"].as_u64().unwrap() as usize]["post_systems"],"case{} final material systems",case["id"]);}
    assert_eq!(json!(world.bodies().iter().copied().map(crate::ivp_joint_apply::tests::snapshot).collect::<Vec<_>>()),bank(&case["predicted_after"]),"case{} staged owner final physical bank",case["id"]);
    for id in 0..3{assert_eq!(json!(world.registry().unit_cores(id).unwrap()),case["predicted_units"][id]["members"]);assert_eq!(json!(world.registry().unit_flags(id).unwrap().flags&0xff),case["predicted_units"][id]["state"]);assert_eq!(discovery.motion_snapshot(id+1),case["post_motion"][id]);}
   }

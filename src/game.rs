@@ -1456,8 +1456,13 @@ pub fn run(root: &Path, path: &Path, capture: Option<String>, verify: bool) -> i
     );
     app.add_systems(
         PostUpdate,
+        crate::precipitation::update.after(bevy::transform::TransformSystems::Propagate),
+    );
+    app.add_systems(
+        PostUpdate,
         crate::source_particles::update
             .after(crate::gun_effects::update)
+            .after(crate::precipitation::update)
             .before(bevy::asset::AssetEventSystems)
             .before(bevy::camera::visibility::VisibilitySystems::CheckVisibility),
     );
@@ -1469,6 +1474,7 @@ pub fn run(root: &Path, path: &Path, capture: Option<String>, verify: bool) -> i
             game_ui::setup,
             crate::l4d2r_cinematic::setup,
             crate::gun_effects::setup,
+            crate::precipitation::setup,
             crate::source_particles::setup,
             crate::graphics_options::setup_grain,
             game_ui::target_camera,
@@ -1794,6 +1800,9 @@ pub(crate) fn apply_prepared(world: &mut World, prepared: Prepared, root: &Path)
     world
         .run_system_once(crate::gun_effects::setup)
         .expect("Rebuild weapon effects");
+    world
+        .run_system_once(crate::precipitation::setup)
+        .expect("Rebuild precipitation");
     world
         .run_system_once(crate::source_particles::setup)
         .expect("Rebuild effects");
@@ -3919,6 +3928,7 @@ fn director(
     let Some(native) = native.as_mut() else {
         return;
     };
+    let _dir0 = crate::performance::scope("director::logic");
     if let Some(logic) = cinematic.as_mut() {
         native.set_script_time(logic.world.time);
         if native.script_sync_due(time.delta_secs()) || !logic.world.cine.script_commands.is_empty()
@@ -3953,6 +3963,8 @@ fn director(
     flush_vscript_commands(native, cinematic.as_deref_mut(), &mut audio);
     // A dead infected player (e.g. an exploded Boomer awaiting respawn) does
     // not stop the survivors' Director.
+    drop(_dir0);
+    let _dir1 = crate::performance::scope("director::samples");
     if s.paused || (s.dead && !s.infected) || cinematic.as_ref().is_some_and(|c| c.active) {
         return;
     }
@@ -4016,6 +4028,8 @@ fn director(
     if living.len() > alive + 64 {
         living.retain(|e, _| enemies.get(*e).is_ok_and(|(_, _, en, _, _)| en.health > 0.));
     }
+    drop(_dir1);
+    let _dir2 = crate::performance::scope("director::tick");
     let count = native.tick(time.delta_secs(), s.health, nearby, alive, body.feet);
     // A panic's MegaMobIncoming plays as STAGE_INITIAL_DELAY ends, whether
     // or not the common limit leaves room to spawn.
@@ -4041,6 +4055,8 @@ fn director(
     flush_vscript_commands(native, cinematic.as_deref_mut(), &mut audio);
     // Online guests spawn nothing: the host's game runs the horde
     // (net_infected).
+    drop(_dir2);
+    let _dir3 = crate::performance::scope("director::spawn");
     if crate::net_play::guest() {
         return;
     }
@@ -4072,6 +4088,8 @@ fn director(
     let mut living = vec![body.feet];
     living.extend(squad.0.iter().filter(|m| !m.state.dead).map(|m| m.position));
     let mut population = alive + count;
+    drop(_dir3);
+    let _dir4 = crate::performance::scope("director::wanderers");
     for (spot, center) in native.wanderer_spots(time.delta_secs(), &living) {
         if living.iter().any(|p| p.distance(center) < THREAT_CLEAR_RADIUS * UNIT) {
             while native.wanderers_at(spot) > 0 {
@@ -4115,6 +4133,8 @@ fn director(
     // have left the safe area, placed out of every survivor's sight between
     // z_spawn_safety_range and z_spawn_range. Not while the player is an
     // infected (the player's own team is the infected team then).
+    drop(_dir4);
+    let _dir5 = crate::performance::scope("director::rest");
     if !s.infected {
         let live = crate::special_infected::ai::live_counts(specials.iter());
         // `--ai-specials-now` (playtests/captures): ignore the safe-area
@@ -5047,7 +5067,13 @@ fn squad_ai(
                     member.aim = Vec3::from_array(binary::source_position([r.cos(), r.sin(), 0.])).normalize_or(member.aim);
                 }
                 positions[index].0 = member.position;
+                println!("bot_setpos applied: {} at {:?}", member.model, member.position / 0.0254);
             }
+        }
+        // L4D2R_BOT_POS: debug, each bot's position (Source units) once a second.
+        if std::env::var_os("L4D2R_BOT_POS").is_some() && (time.elapsed_secs() * 60.) as u32 % 60 == 0 {
+            let p = member.position / 0.0254;
+            println!("L4D2R bot {} at ({:.0} {:.0} {:.0})", member.model, p.x, -p.z, p.y);
         }
         if member.state.action > 0. {
             recovery.reset(index);

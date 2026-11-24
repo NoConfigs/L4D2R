@@ -95,14 +95,8 @@ impl Entry<'_>{
  }
  fn track_pending_hulls(&mut self,owner:&mut ownership::Ownership,id:usize,bodies:&[crate::ivp_joint_apply::Body;2],properties:[crate::ivp_minimizer::owner::Properties;2],allowance:f32,linear_delta:f32)->Result<(),&'static str>{
   let predicted=self.key.slots.map(|j|owner.hulls[j].budget.predicted);
-  let epsilon=f32::from_bits(0x2edbe6ff);
-  let keys=if bodies[0].object_flags&7==0{[predicted[0]+epsilon,predicted[1]+allowance]}
-   else if bodies[1].object_flags&7==0{[predicted[0]+allowance,predicted[1]+epsilon]}
-   else{
-    let speeds=std::array::from_fn::<_,2,_>(|j|(properties[j].angular_bound+crate::ivp_bounds::speed(Vec3::from_array(bodies[j].linear[..3].try_into().unwrap())))+epsilon);
-    let weights=[speeds[1]*0.1+speeds[0],speeds[0]*0.1+speeds[1]];let scale=allowance/(weights[1]+weights[0]);
-    [scale*weights[0]+predicted[0],scale*weights[1]+predicted[1]]
-   };
+  let motion=std::array::from_fn(|j|[crate::ivp_bounds::speed(Vec3::from_array(bodies[j].linear[..3].try_into().unwrap())),properties[j].angular_bound]);
+  let keys=crate::ivp_distance_schedule::auxiliary_hull_keys(predicted,bodies.map(|b|b.object_flags),motion,allowance)?;
   self.contact.flags=(self.contact.flags&0xffd7ffff)|0x140000;owner.graph.set_flags(id,self.contact.flags)?;
   owner.track_far(id,keys,linear_delta)
  }

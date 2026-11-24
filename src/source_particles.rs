@@ -78,6 +78,10 @@ struct Renderer {
     trail_min: f32,
     trail_fade: f32,
     rope: bool,
+    /// render_rope "texel_size": world units per texel along the rope; the
+    /// texture repeats every texel_size x its height (0: one copy per
+    /// segment).
+    rope_texel: f32,
     /// Renderer visibility by camera distance to the proxy control point:
     /// (distance min, distance max, alpha scale min, alpha scale max), Source
     /// units. The distance is remapped min..max to 0..1 and the alpha scale
@@ -117,6 +121,7 @@ impl Renderer {
             trail_min: node.number("min length", 0.).max(0.) * 0.0254,
             trail_fade: node.number("length fade in time", 0.).max(0.),
             rope: name == "render_rope",
+            rope_texel: if name == "render_rope" { node.number("texel_size", 0.).max(0.) } else { 0. },
             visibility: {
                 let (lo, hi) = (
                     node.number("Visibility input distance minimum", 0.),
@@ -145,6 +150,9 @@ struct Definition {
     color_fade: Option<(Vec3, [f32; 2], bool)>,
     pre_age: Option<NoiseRemap>,
     cull: Option<([f32; 2], f32, f32)>,
+    /// No operator ever kills a particle (no decay, lifespan or cull-when
+    /// operator): Source keeps them past their lifetime (string lights).
+    immortal: bool,
     flip: f32,
     trail_time: ([f32; 2], f32),
     control_lock: Option<(bool, f32)>,
@@ -197,6 +205,29 @@ struct Definition {
     rope: bool,
     cull_plane: Option<f32>,
     path_steps: Option<f32>,
+    /// Position Along Path Sequential for map emitters (string lights).
+    path: Option<SequentialPath>,
+    /// Movement Maintain Position Along Path: particles are put back on
+    /// their path slot every frame (c2m2's flag_banner_01 pennants).
+    maintain_path: Option<SequentialPath>,
+    /// Color Lit Per Particle: random colour between two (0-255), scaled
+    /// by the world light at the particle with this bias (1 = fully lit).
+    lit_color: Option<([Vec3; 2], f32)>,
+    /// Position on Model Random: the control point whose entity's model the
+    /// particles spawn on (c1m1's inferno_wall fills func_brush volumes).
+    model_cp: Option<usize>,
+    /// Color Random tint: (fraction, control point, clamp min, clamp max in
+    /// 0-255); the colour moves that far toward the light at the point.
+    color_tint: Option<(f32, usize, Vec3, Vec3)>,
+    /// "Position from Parent Cache": spawns at impact points the parent
+    /// caches ("Lifetime from Time to Impact"), which are not computed yet.
+    parent_cache: bool,
+    /// "Cull relative to Ray Trace Environment" on PRECIPITATIONBLOCKER:
+    /// a drop under a roof (an upward world hit that is not sky) is culled.
+    roof_cull: bool,
+    /// Lifetime from Time to Impact: (trace length, trace start offset,
+    /// impact points cached for "Position from Parent Cache" children).
+    impact: Option<(f32, f32, usize)>,
     distance_radius: Option<([f32; 2], [f32; 2])>,
     /// Operator "Remap Distance to Control Point to Scalar" on the radius
     /// (C_OP_DistanceToCP): every frame the radius becomes the remapped
@@ -346,6 +377,7 @@ fn definition(elements: &[Element], index: usize) -> Option<Definition> {
         color_fade: None,
         pre_age: None,
         cull: None,
+        immortal: false,
         flip: 0.,
         trail_time: ([0.1, 0.1], 1.),
         control_lock: None,
@@ -395,11 +427,25 @@ fn definition(elements: &[Element], index: usize) -> Option<Definition> {
         max: node.number("max_particles", 1000.).clamp(1., 8192.) as usize,
         max_draw_distance: node.number("maximum draw distance", 100000.).max(0.) * 0.0254,
         path_steps: None,
+        path: None,
+        maintain_path: None,
+        lit_color: None,
+        model_cp: None,
+        color_tint: None,
+        parent_cache: false,
+        roof_cull: false,
+        impact: None,
         distance_radius: None,
         live_distance_radius: None,
         radius_alpha: None,
         creation_remaps: vec![],
     };
+    d.immortal = !node.references("operators").into_iter().any(|i| {
+        elements.get(i).is_some_and(|o| {
+            let name = o.text("functionName").to_ascii_lowercase();
+            name.contains("decay") || name.contains("lifespan") || name.contains("cull when") || name.contains("kill")
+        })
+    });
     for key in ["emitters", "initializers", "operators"] {
         for i in node.references(key) {
             let Some(o) = elements.get(i) else {
@@ -481,7 +527,7 @@ fn definition(elements: &[Element], index: usize) -> Option<Definition> {
                     })
                 }
                 "emit_instantaneously" => {
-                    d.burst = o.number("num_to_emit", 1.).clamp(0., 128.) as usize;
+                    d.burst = o.number("num_to_emit", 1.).clamp(0., 8192.) as usize;
                     d.start = o.number("emission_start_time", 0.);
                 }
                 "alpha fade and decay" => {
@@ -519,7 +565,16 @@ fn definition(elements: &[Element], index: usize) -> Option<Definition> {
                 "lifetime random" => d.life = pair("lifetime_min", "lifetime_max", 1.),
                 "alpha random" => d.alpha = pair("alpha_min", "alpha_max", 255.),
                 "color random" => {
-                    d.color = [vector("color1", [255.; 3]), vector("color2", [255.; 3])]
+                    d.color = [vector("color1", [255.; 3]), vector("color2", [255.; 3])];
+                    let tint = o.number("tint_perc", 0.).clamp(0., 1.);
+                    if tint > 0. {
+                        d.color_tint = Some((
+                            tint,
+                            o.number("tint control point", 0.).clamp(0., 63.) as usize,
+                            vector("tint clamp min", [0.; 3]),
+                            vector("tint clamp max", [255.; 3]),
+                        ));
+                    }
                 }
                 "position within sphere random" => {
                     d.distance = o.number("distance_max", 0.);
@@ -657,9 +712,53 @@ fn definition(elements: &[Element], index: usize) -> Option<Definition> {
                     .map(f32::to_radians);
                     d.rotation_exponent = o.number("rotation_random_exponent", 1.).max(0.001);
                 }
+                "cull relative to ray trace environment"
+                    if o.text("ray trace environment name").eq_ignore_ascii_case("PRECIPITATIONBLOCKER") =>
+                {
+                    d.roof_cull = true;
+                }
+                "lifetime from time to impact" => {
+                    d.impact = Some((
+                        o.number("maximum trace length", 1024.).max(0.),
+                        o.number("trace offset", 0.),
+                        o.number("maximum points to cache", 16.).clamp(1., 1024.) as usize,
+                    ));
+                }
+                "position from parent cache" => {
+                    d.parent_cache = true;
+                }
+                "position on model random" => {
+                    d.model_cp = Some(o.number("control_point_number", 0.).clamp(0., 63.) as usize);
+                }
+                "color lit per particle" => {
+                    d.lit_color = Some((
+                        [vector("color1", [255.; 3]), vector("color2", [255.; 3])],
+                        o.number("light bias", 0.).clamp(0., 1.),
+                    ));
+                }
+                "movement maintain position along path" => {
+                    d.maintain_path = Some(SequentialPath {
+                        start: o.number("start control point number", 0.).clamp(0., 63.) as usize,
+                        end: o.number("end control point number", 0.).clamp(0., 63.) as usize,
+                        pairs: o.boolean("Use sequential CP pairs between start and end point"),
+                        steps: o.number("particles to map from start to end", 100.).max(1.),
+                        bulge: o.number("bulge", 0.),
+                        bulge_control: o.number("bulge control 0=random 1=orientation of start pnt 2=orientation of end point", 0.) as u8,
+                        mid: o.number("mid point position", 0.5),
+                    });
+                }
                 "position along path sequential" => {
                     d.path_steps =
                         Some(o.number("particles to map from start to end", 100.).max(2.));
+                    d.path = Some(SequentialPath {
+                        start: o.number("start control point number", 0.).clamp(0., 63.) as usize,
+                        end: o.number("end control point number", 0.).clamp(0., 63.) as usize,
+                        pairs: o.boolean("Use sequential CP pairs between start and end point"),
+                        steps: o.number("particles to map from start to end", 100.).max(1.),
+                        bulge: o.number("bulge", 0.),
+                        bulge_control: o.number("bulge control 0=random 1=orientation of start pnt 2=orientation of end point", 0.) as u8,
+                        mid: o.number("mid point position", 0.5),
+                    });
                 }
                 "remap initial distance to control point to scalar"
                     if o.number("output field", 3.) == 3. =>
@@ -818,6 +917,12 @@ struct Batch {
     previous_control: Option<l4d2r_math::Mat4>,
     owner: usize,
     controls: Vec<usize>,
+    /// Next slot of a sequential path initializer.
+    path_sequence: usize,
+    /// Recent impact points (Lifetime from Time to Impact), a ring buffer
+    /// read by "Position from Parent Cache" children.
+    impacts: Vec<Vec3>,
+    impact_cursor: usize,
     definition: Definition,
     sheet: Vec<SheetSequence>,
     zoom: f32,
@@ -836,6 +941,11 @@ struct Batch {
     crop: [f32; 2],
     /// Material takes vertex fog ($vertexfogamount); smoke1_nofog does not.
     fogged: bool,
+}
+/// Particle texture heights in texels by material (rope texture repeat).
+static TEXTURE_HEIGHTS: std::sync::Mutex<Option<HashMap<String, f32>>> = std::sync::Mutex::new(None);
+fn texture_height(material: &str) -> f32 {
+    TEXTURE_HEIGHTS.lock().unwrap().as_ref().and_then(|m| m.get(material).copied()).unwrap_or(0.)
 }
 struct ParticleDraw {
     renderer_index: usize,
@@ -1061,6 +1171,9 @@ pub fn setup(
                     previous_control: None,
                     owner: id,
                     controls: controls.clone(),
+                    path_sequence: 0,
+                    impacts: vec![],
+                    impact_cursor: 0,
                     definition: d.clone(),
                     sheet: vec![],
                     zoom: 1.,
@@ -1102,6 +1215,7 @@ pub fn setup(
                     )?;
                     let sheet = source_pcf::sheet(&bytes)?;
                     let texture = crate::vtf::decode(&bytes, 2048)?;
+                    TEXTURE_HEIGHTS.lock().unwrap().get_or_insert_with(HashMap::new).insert(d.material.clone(), texture.height as f32);
                     let image = Image::new(
                         Extent3d {
                             width: texture.width,
@@ -1300,6 +1414,9 @@ pub fn setup(
                 previous_control: None,
                 owner: id,
                 controls: controls.clone(),
+                path_sequence: 0,
+                impacts: vec![],
+                impact_cursor: 0,
                 definition: d.clone(),
                 sheet,
                 zoom,
@@ -1388,6 +1505,52 @@ fn empty_mesh() -> Mesh {
 }
 fn between(rng: &mut UniformRandomStream, pair: [f32; 2]) -> f32 {
     rng.random_float(pair[0].min(pair[1]), pair[0].max(pair[1]))
+}
+/// C_INIT_CreateSequentialPath parameters.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SequentialPath {
+    start: usize,
+    end: usize,
+    pairs: bool,
+    steps: f32,
+    bulge: f32,
+    bulge_control: u8,
+    mid: f32,
+}
+impl SequentialPath {
+    /// Control points (start, end) and curve parameter of slot `sequence`.
+    /// "Particles to map" counts the whole path; with CP pairs each span
+    /// (start..start+1, ..., end-1..end) gets an equal share, and every
+    /// span's slots run from its start point to its end point inclusive.
+    fn slot(&self, sequence: usize) -> (usize, usize, f32) {
+        let spans = if self.pairs { self.end.saturating_sub(self.start).max(1) } else { 1 };
+        let per = ((self.steps / spans as f32).round() as usize).max(1);
+        let span = (sequence / per) % spans;
+        let i = sequence % per;
+        let t = if per > 1 { i as f32 / (per - 1) as f32 } else { 0. };
+        if self.pairs {
+            (self.start + span, (self.start + span + 1).min(self.end.max(self.start + 1)), t)
+        } else {
+            (self.start, self.end, t)
+        }
+    }
+    /// CParticleCollection::CalculatePathValues + quadratic interpolation:
+    /// the midpoint bulges along the chosen control point's forward axis,
+    /// scaled by span length and by how square that axis is to the span.
+    fn position(&self, start: Vec3, end: Vec3, forward: Vec3, t: f32, random: Vec3) -> Vec3 {
+        let mut mid = start.lerp(end, self.mid);
+        if self.bulge_control != 0 {
+            let span = end - start;
+            let length = span.length();
+            let scale = if length > 1e-6 { 1. - (span / length).dot(forward.normalize_or_zero()).abs() } else { 0. };
+            if forward.length_squared() > 1e-12 {
+                mid += forward.normalize() * self.bulge * length * scale;
+            }
+        } else {
+            mid += random * self.bulge * 0.0254;
+        }
+        start.lerp(mid, t).lerp(mid.lerp(end, t), t)
+    }
 }
 fn point(logic: &crate::l4d2r_cinematic::MapLogic, id: usize) -> Vec3 {
     Vec3::from_array(binary::source_position(
@@ -1692,9 +1855,13 @@ pub fn update(
         let d = &batch.definition;
         // Viewmodel effects bypass world PVS; live attachment motion must not
         // trigger BSP cluster scans every rendered frame.
+        let precipitation = e.me.targetname.starts_with(crate::precipitation::PREFIX);
         if !e.me.targetname.starts_with("__rewrite_muzzle_fp_")
+            && !precipitation
             && batch.cull_origin != Some(origin)
-            && batch.controls.is_empty()
+            // Control-point systems (string lights) span their points; scan
+            // once, and again only if the emitter really moves.
+            && (batch.controls.is_empty() || batch.cull_origin.is_none_or(|c| c.distance(origin) > 1.))
         {
             let life = if d.lifetime_fps > 0. {
                 batch
@@ -1750,10 +1917,14 @@ pub fn update(
                 .0
                 .world
                 .visibility
-                .clusters_in_bounds(origin - Vec3::splat(extent), origin + Vec3::splat(extent));
+                .clusters_in_bounds(
+                    batch.controls.iter().fold(origin, |m, id| m.min(point(&logic, *id))) - Vec3::splat(extent),
+                    batch.controls.iter().fold(origin, |m, id| m.max(point(&logic, *id))) + Vec3::splat(extent),
+                );
             batch.cull_origin = Some(origin);
         }
         let show = e.me.targetname.starts_with("__rewrite_muzzle_fp_")
+            || precipitation
             || sky.is_some()
             || !pvs
             || camera_clusters.iter().any(|c| {
@@ -1768,7 +1939,10 @@ pub fn update(
         let emission_dt=emission_overlap(local,(local-batch.emission_local).max(0.),d.start,d.duration);
         if active { batch.emission_local=batch.emission_local.max(local); }
         let minimum_frames=foreground_minimum_frames(d.minimum_rendered_frames,e.me.targetname.starts_with("__rewrite_muzzle_fp_"));
-        let emitting = active && (emission_dt>0. || (!batch.burst_fired && local>=d.start && (d.duration<=0. || local-dt<d.start+d.duration)));
+        // Without the parent's impact cache these would spawn at the
+        // emitter: c8m1's rain splashes stood as large refraction crowns
+        // around the camera. Emit nothing until the cache exists.
+        let emitting = active && (!d.parent_cache || parent.is_some_and(|p| !p.impacts.is_empty())) && (emission_dt>0. || (!batch.burst_fired && local>=d.start && (d.duration<=0. || local-dt<d.start+d.duration)));
         let old_count = batch.particles.len();
         if emitting {
             let points = batch.controls.len();
@@ -1776,6 +1950,11 @@ pub fn update(
                 1.
             } else {
                 graphics.as_ref().map_or(1., |g| g.effect_scale())
+            } * if precipitation {
+                // func_precipitation density (crate::precipitation).
+                e.me.kv_f32("precip_density").unwrap_or(1.).max(0.)
+            } else {
+                1.
             };
             if !batch.burst_fired {
                 batch.credit += d.burst as f32 * quality;
@@ -1791,7 +1970,11 @@ pub fn update(
                     parent.map(|b| b.particles.len()),
                 );
             let count = (batch.credit as usize)
-                .min(if d.burst > 0 {
+                .min(if d.burst > 0 && d.path.is_some() {
+                    // String lights: one burst lays out every span
+                    // (string_lights_06_glow_group_4 emits 192).
+                    d.max
+                } else if d.burst > 0 {
                     128
                 } else if e.me.targetname.starts_with("__rewrite_muzzle_fp_") {
                     d.max
@@ -1871,7 +2054,43 @@ pub fn update(
                 );
                 let offset = offset + authored_offset;
                 let mut center = center;
-                if e.me.targetname.starts_with("__rewrite_muzzle_fp_") {
+                // Position from Parent Cache: a recent impact point of the
+                // parent (rain splashes where drops hit).
+                if d.parent_cache {
+                    if let Some(points) = parent.map(|p| &p.impacts).filter(|v| !v.is_empty()) {
+                        center = points[rng.random_int(0, points.len() as i32 - 1).max(0) as usize % points.len()];
+                    }
+                }
+                // Position on Model Random on a brush entity (no hitboxes):
+                // a random point in its world bounds, as Source falls back
+                // to the collision box.
+                if let Some(id) = d.model_cp.filter(|&cp| cp > 0).and_then(|cp| batch.controls.get(cp - 1).copied()) {
+                    if logic.world.ents.get(id).is_some_and(|e| e.me.brush.is_some()) {
+                        if let Some((lo, hi)) = logic.bounds(id) {
+                            let r = [between(rng, [0., 1.]), between(rng, [0., 1.]), between(rng, [0., 1.])];
+                            let p = [lo.x + (hi.x - lo.x) * r[0], lo.y + (hi.y - lo.y) * r[1], lo.z + (hi.z - lo.z) * r[2]];
+                            // MapLogic::bounds is already in world space (metres).
+                            center = Vec3::from_array(p);
+                        }
+                    }
+                }
+                if let (Some(path), false) = (d.path, e.me.targetname.starts_with("__rewrite_muzzle_fp_")) {
+                    // Map string lights: lay the slots out along the CP
+                    // path (each wire's points and its child's bulbs).
+                    let (a, b, t) = path.slot(batch.path_sequence);
+                    batch.path_sequence += 1;
+                    let cp = |i: usize| -> Option<(Vec3, Vec3)> {
+                        let id = if i == 0 { batch.owner } else { *batch.controls.get(i - 1)? };
+                        let m = logic.world.world_matrix(id);
+                        let at = if i == 0 { origin } else { point(&logic, id) };
+                        Some((at, Vec3::from_array(binary::source_position(m.x_axis.truncate().to_array()))))
+                    };
+                    if let (Some((start, start_forward)), Some((end, end_forward))) = (cp(a), cp(b)) {
+                        let forward = if path.bulge_control == 1 { start_forward } else { end_forward };
+                        let random = Vec3::new(between(rng, [-1., 1.]), between(rng, [-1., 1.]), between(rng, [-1., 1.]));
+                        center = path.position(start, end, forward, t, random);
+                    }
+                } else if e.me.targetname.starts_with("__rewrite_muzzle_fp_") {
                     if let Some(steps) = d.path_steps {
                         let (pitch, yaw) = (e.me.angles.x.to_radians(), e.me.angles.y.to_radians());
                         let forward = Vec3::new(
@@ -2086,6 +2305,17 @@ pub fn update(
                         f32::INFINITY
                     }
                 });
+                if d.roof_cull && precipitation {
+                    // Rain under a roof: straight up hits world that is not
+                    // sky (SURF_SKY 0x4 / SURF_SKY2D 0x2).
+                    let s = [position.x / 0.0254, -position.z / 0.0254, position.y / 0.0254];
+                    if let Some((fraction, _, texinfo, solid)) = collision.source_ray(s, [s[0], s[1], s[2] + 4096.], 0x1 | 0x2, false) {
+                        let sky = texinfo.and_then(|t| logic.world.bsp.texinfo.get(t)).is_some_and(|t| t.flags & 0x6 != 0);
+                        if solid || (fraction < 1. && !sky) {
+                            continue;
+                        }
+                    }
+                }
                 let mut normal = Vec3::Y;
                 if let Some((length, offset, kill_on_miss)) = d.ground {
                     let hit = collision.physics_trace(
@@ -2137,6 +2367,56 @@ pub fn update(
                         })
                     }),
                 });
+                if let (Some((length, offset, cap)), Some(p)) = (d.impact, batch.particles.last_mut()) {
+                    // Lifetime from Time to Impact: trace along the drop's
+                    // velocity; it lives until it reaches the surface, and
+                    // the point feeds the splash child.
+                    let speed = p.velocity.length();
+                    let mut hit = None;
+                    if speed > 1e-3 {
+                        let dir = p.velocity / speed;
+                        let to_source = |v: Vec3| [v.x / 0.0254, -v.z / 0.0254, v.y / 0.0254];
+                        let (a, b) = (p.position + dir * (offset * 0.0254), p.position + dir * (length * 0.0254));
+                        if let Some((fraction, _, _, solid)) = collision.source_ray(to_source(a), to_source(b), 0x1 | 0x2, false) {
+                            if !solid && fraction < 1. {
+                                let at = a.lerp(b, fraction);
+                                let distance = (at - p.position).dot(dir);
+                                if distance > 0. {
+                                    p.life = p.life.min(distance / speed).max(0.001);
+                                    hit = Some(at);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(at) = hit {
+                        if batch.impacts.len() < cap {
+                            batch.impacts.push(at);
+                        } else {
+                            let slot = batch.impact_cursor % cap;
+                            batch.impacts[slot] = at;
+                        }
+                        batch.impact_cursor = batch.impact_cursor.wrapping_add(1);
+                    }
+                }
+                if let (Some((tint, tint_cp, lo, hi)), Some(p)) = (d.color_tint, batch.particles.last_mut()) {
+                    // Color Random's tint: toward the (clamped) light at the
+                    // tint control point (smoke_precipitation takes the
+                    // player's, warm in c1m1's burning ballroom).
+                    let at = if tint_cp == 0 { Some(origin) } else { batch.controls.get(tint_cp - 1).map(|&id| point(&logic, id)) };
+                    if let Some(at) = at {
+                        let cube = map.0.world.ambient_field.sample(at.to_array());
+                        let light = cube.iter().fold(Vec3::ZERO, |s, f| s + Vec3::from_array(*f)) / 6. * 255.;
+                        p.color = p.color.lerp(light.clamp(lo, hi) / 255., tint);
+                    }
+                }
+                if let (Some(([c1, c2], bias)), Some(p)) = (d.lit_color, batch.particles.last_mut()) {
+                    // Lit by the map's ambient light at the particle (models'
+                    // light field), as Source queries the light at its point.
+                    let cube = map.0.world.ambient_field.sample(p.position.to_array());
+                    let light = cube.iter().fold(Vec3::ZERO, |s, f| s + Vec3::from_array(*f)) / 6.;
+                    let lit = Vec3::splat(1. - bias) + light * bias;
+                    p.color = c1.lerp(c2, between(rng, [0., 1.])) / 255. * lit;
+                }
                 if backlog > 0. {
                     if let Some(p) = batch.particles.last_mut() {
                         // Births spread evenly over the part of the backlog
@@ -2251,13 +2531,38 @@ pub fn update(
         }
         batch.previous_control = Some(control);
         batch.particles.retain(|p| {
-            minimum_frame_age(p.age,p.life,p.rendered_frames,minimum_frames) < p.life
+            (d.immortal || minimum_frame_age(p.age,p.life,p.rendered_frames,minimum_frames) < p.life)
                 && minimum_frame_age(p.age,p.life,p.rendered_frames,minimum_frames) < p.kill_at
                 && e.alive
                 && d.cull_plane
                     .is_none_or(|offset| p.position.y >= origin.y + offset)
         });
-        if d.rope {
+        if let Some(path) = d.maintain_path {
+            let cp = |i: usize| -> Option<(Vec3, Vec3)> {
+                let id = if i == 0 { batch.owner } else { *batch.controls.get(i - 1)? };
+                let m = logic.world.world_matrix(id);
+                let at = if i == 0 { origin } else { point(&logic, id) };
+                Some((at, Vec3::from_array(binary::source_position(m.x_axis.truncate().to_array()))))
+            };
+            let slots: Vec<_> = (0..batch.particles.len()).map(|slot| {
+                let (a, b, t) = path.slot(slot);
+                match (cp(a), cp(b)) {
+                    (Some((start, sf)), Some((end, ef))) => {
+                        let forward = if path.bulge_control == 1 { sf } else { ef };
+                        Some(path.position(start, end, forward, t, Vec3::ZERO))
+                    }
+                    _ => None,
+                }
+            }).collect();
+            for (p, at) in batch.particles.iter_mut().zip(slots) {
+                if let Some(at) = at {
+                    p.position = at;
+                    p.previous_position = at;
+                    p.velocity = Vec3::ZERO;
+                }
+            }
+        }
+        if d.rope && d.path.is_none() {
             if let Some(end) = batch.controls.first().map(|id| point(&logic, *id)) {
                 let count = batch.particles.len().saturating_sub(1).max(1) as f32;
                 for (i, p) in batch.particles.iter_mut().enumerate() {
@@ -2293,6 +2598,16 @@ pub fn update(
                         .fold(0., f32::max),
                 )
                 .is_none_or(|bound| frustum.intersects_obb_identity(&bound)));
+        // L4D2R_PATH_DEBUG: path-initialized map emitters (string lights),
+        // once a second: count, Source-unit bounds, and each draw gate.
+        static PATH_TICK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if d.path.is_some() && std::env::var_os("L4D2R_PATH_DEBUG").is_some() && PATH_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 997 == 0 {
+            let s = |v: Vec3| (v.x / 0.0254, -v.z / 0.0254, v.y / 0.0254);
+            let lo = batch.particles.iter().fold(Vec3::splat(f32::MAX), |m, p| m.min(p.position));
+            let hi = batch.particles.iter().fold(Vec3::splat(f32::MIN), |m, p| m.max(p.position));
+            println!("L4D2RPATH owner={} {} n={} lo={:.0?} hi={:.0?} show={show} within={within_draw_distance} geom={visible_geometry} clusters={} controls={}",
+                batch.owner, d.material, batch.particles.len(), s(lo), s(hi), batch.clusters.len(), batch.controls.len());
+        }
         static VIS_WORLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let vis_world = *VIS_WORLD.get_or_init(|| std::env::var_os("L4D2R_PFX_VIS_WORLD").is_some());
         for (renderer_index, renderer) in d.renderers.iter().enumerate() {
@@ -2394,11 +2709,16 @@ pub fn update(
                     let Some(next) = batch.particles.get(index + 1) else {
                         continue;
                     };
+                    // Total rope width = particle radius (Source's beam
+                    // width); half of it to each side. Source's beam takes
+                    // its perpendicular from the eye toward the rope, which
+                    // hangs c2m2's pennants tips down.
                     let side = (next.position - p.position)
-                        .cross(camera.translation - p.position)
+                        .cross(p.position - camera.translation)
                         .normalize_or_zero()
                         * p.radius
-                        * scale;
+                        * scale
+                        * 0.5;
                     [
                         p.position - side,
                         p.position + side,
@@ -2502,6 +2822,47 @@ pub fn update(
                     }
                     p.color.lerp(target, t)
                 });
+                // render_rope with texel_size: the texture repeats along the
+                // rope every texel_size x height units (c2m2's flag_banner_01
+                // pennants every ~11.6 units), so a segment is cut into
+                // pieces at the repeat boundaries, each mapping its own part
+                // of the atlas. Rope distance runs from the first particle.
+                let repeat = if renderer.rope && renderer.rope_texel > 0. {
+                    renderer.rope_texel * texture_height(&d.material) * 0.0254
+                } else {
+                    0.
+                };
+                if repeat > 1e-4 {
+                    let Some(next) = batch.particles.get(index + 1) else { continue };
+                    let start = batch.particles[..=index].windows(2).map(|w| w[0].position.distance(w[1].position)).sum::<f32>();
+                    let length = p.position.distance(next.position);
+                    let (u0, u1, v0, v1) = (atlas[0], atlas[2], atlas[3], atlas[1]);
+                    let mut s = 0.;
+                    while s < length - 1e-5 {
+                        let along = (start + s) / repeat;
+                        let phase = along - along.floor();
+                        let step = ((1. - phase) * repeat).min(length - s);
+                        let (t0, t1) = (s / length, (s + step) / length);
+                        let (pa, pb) = (p.position.lerp(next.position, t0), p.position.lerp(next.position, t1));
+                        let (side_a, side_b) = (corners[1] - p.position, corners[2] - next.position);
+                        let (sa, sb) = (side_a.lerp(side_b, t0), side_a.lerp(side_b, t1));
+                        let (va, vb) = (v0 + (v1 - v0) * phase, v0 + (v1 - v0) * (phase + step / repeat));
+                        let quad = [pa - sa, pa + sa, pb + sb, pb - sb];
+                        let quad_uv = [[u0, va], [u1, va], [u1, vb], [u0, vb]];
+                        let base = positions.len() as u32;
+                        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+                        for i in 0..4 {
+                            positions.push(quad[i].to_array());
+                            uv.push(quad_uv[i]);
+                            next_uv.push(quad_uv[i]);
+                            second_uv.push([quad_uv[i][0], quad_uv[i][1], quad_uv[i][0], quad_uv[i][1]]);
+                            frame_blends.push([0., 0., screen_fade]);
+                            colors.push([color.x, color.y, color.z, alpha * visibility_alpha]);
+                        }
+                        s += step.max(1e-5);
+                    }
+                    continue;
+                }
                 let base = positions.len() as u32;
                 indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
                 for i in 0..4 {
@@ -3521,5 +3882,29 @@ mod tests {
             fraction.x != fraction.y || fraction.y != fraction.z,
             "Noise must not reduce to one correlated random scalar"
         );
+    }
+
+    #[test]
+    fn sequential_path_spreads_slots_over_cp_pairs_and_sags() {
+        // string_lights_06_glow_group_4: 192 bulbs over CPs 0..4 -> 48 per span.
+        let path = SequentialPath { start: 0, end: 4, pairs: true, steps: 192., bulge: 0.2, bulge_control: 2, mid: 0.5 };
+        assert_eq!(path.slot(0), (0, 1, 0.));
+        assert_eq!(path.slot(47), (0, 1, 1.));
+        assert_eq!(path.slot(48), (1, 2, 0.));
+        assert_eq!(path.slot(191), (3, 4, 1.));
+        assert_eq!(path.slot(192), (0, 1, 0.), "a second emission wraps");
+        // A single string (end CP 1, no pairs): 48 bulbs start to end.
+        let single = SequentialPath { start: 0, end: 1, pairs: false, steps: 48., bulge: 0.2, bulge_control: 2, mid: 0.5 };
+        assert_eq!(single.slot(47), (0, 1, 1.));
+        // A level 10 m span sags 0.2 * 10 m / 2 = 1 m at its middle along a
+        // downward-pointing control point (info_particle_target 90 45 0).
+        let (a, b) = (Vec3::ZERO, Vec3::new(10., 0., 0.));
+        let middle = single.position(a, b, -Vec3::Y, 0.5, Vec3::ZERO);
+        assert!((middle - Vec3::new(5., -1., 0.)).length() < 1e-4, "{middle:?}");
+        assert!(single.position(a, b, -Vec3::Y, 0., Vec3::ZERO).distance(a) < 1e-6);
+        assert!(single.position(a, b, -Vec3::Y, 1., Vec3::ZERO).distance(b) < 1e-6);
+        // A span along the bulge axis does not bulge.
+        let down = single.position(a, Vec3::new(0., -10., 0.), -Vec3::Y, 0.5, Vec3::ZERO);
+        assert!((down - Vec3::new(0., -5., 0.)).length() < 1e-4);
     }
 }

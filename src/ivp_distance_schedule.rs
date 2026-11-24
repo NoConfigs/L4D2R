@@ -103,6 +103,16 @@ pub(crate) fn callback(flags:u32,distance:f32,config:Config)->Result<Callback,&'
  let threshold=config.target(flags)?+f32::from_bits(0x3a266515);
  if distance<threshold{Ok(Callback::Physical)}else{Ok(Callback::Reschedule{delay:2})}
 }
+///1010aaf0 paired recursive/pending listener keys. Motion is the native
+/// cached [linear,angular] bound, not a resampled predictor velocity.
+pub(crate) fn auxiliary_hull_keys(predicted:[f32;2],flags:[u32;2],motion:[[f32;2];2],allowance:f32)->Result<[f32;2],&'static str>{
+ if !allowance.is_finite()||predicted.into_iter().any(|v|!v.is_finite())||motion.into_iter().flatten().any(|v|!v.is_finite()||v<0.){return Err("invalid auxiliary hull allowance or motion");}
+ let epsilon=f32::from_bits(0x2edbe6ff);
+ let keys=if flags[0]&7==0{[predicted[0]+epsilon,predicted[1]+allowance]}
+ else if flags[1]&7==0{[predicted[0]+allowance,predicted[1]+epsilon]}
+ else{let speeds=motion.map(|m|(m[1]+m[0])+epsilon);let weights=[speeds[1]*0.1+speeds[0],speeds[0]*0.1+speeds[1]];let scale=allowance/(weights[1]+weights[0]);[scale*weights[0]+predicted[0],scale*weights[1]+predicted[1]]};
+ if !keys.into_iter().all(f32::is_finite){return Err("auxiliary hull key overflow");}Ok(keys)
+}
 #[cfg(test)]
 pub(crate) fn captured_input(s:&serde_json::Value)->Input{
  let f=|v:&serde_json::Value|v.as_f64().unwrap() as f32;let vec=|v:&serde_json::Value|Vec3::from_array(std::array::from_fn(|k|f(&v[k])));

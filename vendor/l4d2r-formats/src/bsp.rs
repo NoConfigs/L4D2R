@@ -155,6 +155,9 @@ pub struct DispInfo {
     pub power: i32,
     pub contents: i32,
     pub map_face: u16,
+    /// Hammer collision flags from minTess when its DISP_INFO_FLAG_MAGIC
+    /// bit is set (2 no physics, 4 no hull, 8 no ray collision), else 0.
+    pub flags: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -416,6 +419,12 @@ impl Bsp {
 
     /// All displacement triangles `(contents, [a,b,c])` for collision.
     pub fn displacement_triangles(&self) -> Vec<(i32, [Vec3; 3])> {
+        self.displacement_triangles_with_flags().into_iter().map(|(c, _, t)| (c, t)).collect()
+    }
+
+    /// As `displacement_triangles`, with each displacement's Hammer
+    /// collision flags (`DispInfo::flags`).
+    pub fn displacement_triangles_with_flags(&self) -> Vec<(i32, u32, [Vec3; 3])> {
         let mut out = Vec::new();
         for f in &self.faces {
             if f.dispinfo < 0 {
@@ -432,9 +441,9 @@ impl Bsp {
             let face_n = if f.side != 0 { -pl } else { pl };
             let mut push = |a: Vec3, b: Vec3, c: Vec3| {
                 if (b - a).cross(c - a).dot(face_n) >= 0.0 {
-                    out.push((di.contents, [a, b, c]));
+                    out.push((di.contents, di.flags, [a, b, c]));
                 } else {
-                    out.push((di.contents, [a, c, b]));
+                    out.push((di.contents, di.flags, [a, c, b]));
                 }
             };
             for y in 0..n - 1 {
@@ -669,6 +678,10 @@ impl Bsp {
                 power: i32_at(c, 20),
                 contents: i32_at(c, 32),
                 map_face: u16_at(c, 36),
+                flags: {
+                    let tess = i32_at(c, 24) as u32;
+                    if tess & 0x8000_0000 != 0 { tess & 0xff } else { 0 }
+                },
             })
             .collect();
         self.entities = parse_entities(&String::from_utf8_lossy(self.lump(LUMP_ENTITIES)));

@@ -1443,6 +1443,16 @@ impl EntityWorld {
             }
             return;
         }
+        if inp == "alpha" {
+            // CBaseEntity::InputAlpha: the render alpha (renderamt). The
+            // storm maps ramp func_precipitation "rain" density through it.
+            if let Ok(value) = param.trim().parse::<f32>() {
+                let me = &mut self.ents[ent].me;
+                me.ent.0.retain(|(k, _)| !k.eq_ignore_ascii_case("renderamt"));
+                me.ent.0.push(("renderamt".into(), value.clamp(0., 255.).to_string()));
+            }
+            return;
+        }
         if self.fog.input(ent,&mut self.ents[ent],&inp,param,self.time) {return;}
         if self.ents[ent].me.classname == "fog_volume" {
             let disabled = self.ents[ent].me.kv_i32("StartDisabled") == Some(1);

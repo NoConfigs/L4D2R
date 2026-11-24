@@ -24,6 +24,11 @@ impl Contact{
  pub(crate) fn refresh_geometry(&mut self,cache:&mut WorldCache,clock:Context,bodies:&[Body;2],hulls:[&CompactTopology;2],headers:[&[TriangleHeader];2])->Result<Update,&'static str>{
     self.refresh_query(cache,clock,bodies,hulls,headers,false)
  }
+ ///1010db00's zero-budget geometry phase without ordinary recovery. Recursive
+ /// parent callbacks use it even though their flags are not pending-class.
+ pub(crate) fn refresh_geometry_zero_budget(&mut self,cache:&mut WorldCache,clock:Context,bodies:&[Body;2],hulls:[&CompactTopology;2],headers:[&[TriangleHeader];2])->Result<Update,&'static str>{
+    self.refresh_query(cache,clock,bodies,hulls,headers,true)
+ }
  pub(crate) fn refresh_pending(&mut self,cache:&mut WorldCache,clock:Context,bodies:&[Body;2],hulls:[&CompactTopology;2],headers:[&[TriangleHeader];2])->Result<Update,&'static str>{
     if self.flags&0x3000!=0x1000{return Err("pending query requires pending contact flags");}
     self.refresh_query(cache,clock,bodies,hulls,headers,true)

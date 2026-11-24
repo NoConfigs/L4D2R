@@ -2,7 +2,7 @@
 //! world owns bodies and the clock; this owner stages contact/cache/hull state.
 //! Recursive counters, custom controllers and held/wheel lifecycle remain
 //! explicit unsupported branches rather than shallow-cloned mutable aliases.
-use super::{Discovery,Lifecycle,Created,FarRegistration};
+use super::{Discovery,Lifecycle,Created,FarRegistration,CreationInput,RecursiveInput};
 use crate::{ivp_surface_admission::contacts::{Entry,ownership::Ownership,TimedEvent,Registration},
  ivp_world_cache::{WorldCache,Context as Clock},ivp_joint_apply::Body,
  ivp_registered_contacts::{ContactWorld,CollisionContext},ivp_event_queue::Queue,
@@ -40,6 +40,7 @@ impl<'a> Owner<'a>{
    cache.bind_contact_object(id as u64,id)?;
   }
   if core_objects.keys().copied().ne(0..physical.bodies().len())||discovery.locations.keys().any(|&id|id==physical.clock().prediction_owner()){return Err("compact owner bank or queue namespace differs");}
+  if discovery.has_recursive_contacts(){return Err("recursive compact lifecycle dispatch is not connected");}
   discovery.try_clone_ordinary()?;ownership.try_clone_unbound()?;
   let flags=discovery.objects.iter().map(|(&id,o)|(id,physical.bodies()[o.core].object_flags)).collect();
   Ok(Self{discovery,ownership,cache,flags,core_objects,gravity,config,face_epsilon,psi_owner:physical.clock().prediction_owner()})
@@ -52,8 +53,8 @@ impl<'a> Owner<'a>{
  #[cfg(test)]
  pub(crate) fn snapshot(&self)->serde_json::Value{
   serde_json::json!({"cache_frames":self.core_objects.iter().map(|(&core,&object)|self.cache.object_frame(object).ok().map(|f|serde_json::json!({"core":core,"object":object,"frame":f.frame_stamp,"quaternion":f.quaternion.map(f32::to_bits),"matrix":f.pose.rotation.to_cols_array().map(f32::to_bits)}))).collect::<Vec<_>>(),"bounds":format!("{:?}",self.discovery.world),"ownership":format!("{:?}",self.ownership),"cache":format!("{:?}",self.cache),
-   "contacts":self.discovery.coarse.iter().map(|(&id,c)|serde_json::json!({"broad":id,"entries":c.entries().iter().map(|e|serde_json::json!({"slots":e.key.slots,"ledges":e.key.ledges,"contact":format!("{:?}",e.contact)})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
-   "locations":self.discovery.locations.iter().map(|(&id,l)|serde_json::json!([id,l.broad,l.key.slots,l.key.ledges])).collect::<Vec<_>>(),
+   "contacts":self.discovery.coarse.iter().map(|(&id,c)|serde_json::json!({"broad":id,"hierarchy":c.hierarchy_snapshot(),"entries":c.entries().iter().map(|e|serde_json::json!({"slots":e.key.slots,"ledges":e.key.ledges,"contact":format!("{:?}",e.contact)})).collect::<Vec<_>>()})).collect::<Vec<_>>(),
+   "locations":self.discovery.locations.iter().map(|(&id,l)|serde_json::json!([id,l.broad,l.key.slots,l.key.ledges,l.path.iter().map(|k|serde_json::json!([k.slots,k.ledges])).collect::<Vec<_>>() ])).collect::<Vec<_>>(),
    "objects":self.discovery.order.iter().map(|&id|serde_json::json!({"id":id,"motion":self.discovery.motion_snapshot(id),"far":self.discovery.far_snapshot(id)})).collect::<Vec<_>>(),
    "flags":self.flags,"core_objects":self.core_objects,"gravity":self.gravity.map(f32::to_bits),"targets":self.config.targets.map(f32::to_bits).to_vec(),"epsilon":self.face_epsilon.to_bits(),"psi_owner":self.psi_owner})
  }
@@ -174,6 +175,24 @@ impl<'a> Owner<'a>{
 
 struct Constructor<'a>{owner:&'a mut Ownership,queue:&'a mut Queue,clock:Clock,deadline:f64,dt:f32,gravity:[f32;3],config:Config,face_epsilon:f32,psi_owner:usize}
 impl Constructor<'_>{
+ fn create_at(&mut self,id:usize,entry:&mut Entry<'_>,convexes:[&Convex;2],input:CreationInput,bodies:&mut[Body;2],cache:&mut WorldCache,upstream:Option<super::super::Counter>)->Result<Created,&'static str>{
+  if let Some(r)=&entry.recursive{
+   // The coarse upstream listener's count slot returns -1 and its change slot
+   // is RET4 (owned10117310/10117300). The top recursive count is therefore
+   // the first effective ancestor, and already listens to all descendants.
+   let root=upstream.unwrap_or_else(||r.count.clone());
+   let timing=Schedule{deadline:self.deadline,dt:self.dt,delay:0,config:self.config,face_epsilon:self.face_epsilon,properties:input.properties,budgets:[crate::ivp_distance_schedule::Budget{time:0.,flags:0,rates:[0.;2],accumulated:[0.;2]};2],allow_far:false};
+   self.owner.with_queue(self.queue,|owner|{
+    for side in 0..2{let h=owner.hulls.get_mut(entry.key.slots[side]).ok_or("recursive constructor lacks auxiliary hull owner")?;if h.first().is_some(){return Err("recursive constructor auxiliary hull owner is not drained");}h.set_motion_inputs(input.budgets[side]);}
+    let mut context=super::super::recursion::construction::Context{cache,bodies,clock:self.clock,timing,gravity:self.gravity,margins:input.margins,motion:input.cached_motion,root,limit:1000,fallback:f32::from_bits(1482907561)};
+    let bindings=super::super::recursion::construction::initialize_new_tree(owner,id,entry,convexes,&mut context)?;
+    if bindings.iter().any(|b|b.id==self.psi_owner){return Err("recursive child collides with reserved world event identity");}
+    Created::from_tree(owner,id,entry,&bindings)
+   })
+  }else{
+   let far=self.initialize(id,entry,convexes,input.budgets,input.properties,bodies,cache)?;Ok(Created{id,far,descendants:vec![]})
+  }
+ }
  fn initialize(&mut self,id:usize,entry:&mut Entry<'_>,convexes:[&Convex;2],budgets:[crate::ivp_hull_budget::Budget;2],properties:[Properties;2],bodies:&mut[Body;2],cache:&mut WorldCache)->Result<Option<FarRegistration>,&'static str>{
   if entry.recursive.is_some()||entry.contact.flags&0x3000!=0||id==self.psi_owner{return Err("unsupported compact constructor or reserved queue identity");}
   self.owner.bind_objects(entry.key.slots,bodies.map(|b|b.id))?;
@@ -187,14 +206,43 @@ impl Constructor<'_>{
  }
 }
 impl Lifecycle for Constructor<'_>{
- fn created(&mut self,entry:&mut Entry<'_>,convexes:[&Convex;2],budgets:[crate::ivp_hull_budget::Budget;2],motion:[Properties;2],bodies:&mut[Body;2],cache:&mut WorldCache)->Result<Created,&'static str>{
+ fn reactivate_recursive(&mut self,id:usize,entry:&mut Entry<'_>,convexes:[&Convex;2],input:RecursiveInput,bodies:&mut[Body;2],cache:&mut WorldCache)->Result<Created,&'static str>{
+  if !input.bindings.is_empty()||!input.far.is_empty()||entry.recursive.as_ref().is_none_or(|r|!r.descendants.entries().is_empty())||((entry.contact.flags>>18)&15)!=5||self.queue.scheduled(id).is_some(){return Err("recursive reactivation requires a childless phase5 parent after hull removal");}
+  self.create_at(id,entry,convexes,input.creation,bodies,cache,Some(input.root))
+ }
+ fn recursive(&mut self,id:usize,entry:&mut Entry<'_>,convexes:[&Convex;2],input:RecursiveInput,bodies:&mut[Body;2],cache:&mut WorldCache)->Result<Created,&'static str>{
+  let data=input.creation;let mut bindings=input.bindings;
+  let timing=Schedule{deadline:self.deadline,dt:self.dt,delay:0,config:self.config,face_epsilon:self.face_epsilon,properties:data.properties,budgets:[crate::ivp_distance_schedule::Budget{time:0.,flags:0,rates:[0.;2],accumulated:[0.;2]};2],allow_far:false};
+  self.owner.with_queue(self.queue,|owner|{
+   for side in 0..2{let h=owner.hulls.get_mut(entry.key.slots[side]).ok_or("recursive callback lacks auxiliary hull owner")?;if h.first().is_some(){return Err("recursive callback auxiliary hull owner is not drained");}h.set_motion_inputs(data.budgets[side]);}
+   for (child,(keys,delta)) in input.far{owner.track_far(child,keys,delta)?;}
+   let mut context=super::super::recursion::construction::Context{cache,bodies,clock:self.clock,timing,gravity:self.gravity,margins:data.margins,motion:data.cached_motion,root:input.root,limit:1000,fallback:f32::from_bits(1482907561)};
+   super::super::recursion::construction::refresh_parent(owner,id,entry,convexes,&mut bindings,&mut context,f32::from_bits(1011875418))?;
+   if bindings.iter().any(|b|b.id==self.psi_owner){return Err("recursive child collides with reserved world event identity");}
+   Created::from_tree(owner,id,entry,&bindings)
+  })
+ }
+ fn created(&mut self,entry:&mut Entry<'_>,convexes:[&Convex;2],input:CreationInput,bodies:&mut[Body;2],cache:&mut WorldCache)->Result<Created,&'static str>{
   let id=self.owner.graph.register(entry.key.slots)?;
-  if self.queue.scheduled(id).is_some(){return Err("new compact contact collides with another world event identity");}
-  let far=self.initialize(id,entry,convexes,budgets,motion,bodies,cache)?;Ok(Created{id,far})
+  if id==self.psi_owner||self.queue.scheduled(id).is_some(){return Err("new compact contact collides with another world event identity");}
+  self.create_at(id,entry,convexes,input,bodies,cache,None)
  }
  fn reactivated(&mut self,id:usize,entry:&mut Entry<'_>,convexes:[&Convex;2],budgets:[crate::ivp_hull_budget::Budget;2],motion:[Properties;2],bodies:&mut[Body;2],cache:&mut WorldCache)->Result<Option<FarRegistration>,&'static str>{
   if self.queue.scheduled(id).is_some(){return Err("far compact contact unexpectedly owns a timed event");}
   self.initialize(id,entry,convexes,budgets,motion,bodies,cache)
  }
- fn retired(&mut self,id:usize,_:&mut Entry<'_>)->Result<(),&'static str>{self.owner.with_queue(self.queue,|owner|owner.retire(id))}
+ fn retired(&mut self,id:usize,entry:&mut Entry<'_>,bindings:&[super::super::recursion::construction::Binding])->Result<(),&'static str>{self.owner.with_queue(self.queue,|owner|super::super::recursion::construction::retire_tree(owner,id,entry,bindings))}
+}
+
+#[cfg(test)]
+pub(crate) fn construct_for_native_check<'a>(owner:&Ownership,id:usize,entry:&Entry<'a>,convexes:[&Convex;2],context:&super::super::recursion::construction::Context<'_>)->(Entry<'a>,Created,Ownership,[Body;2]){
+ let mut candidate=owner.try_clone_unbound().unwrap();candidate.retire(id).unwrap();
+ let mut root=entry.snapshot_with_counters(&mut super::super::CounterSnapshot::default());let mut bodies=*context.bodies;let mut cache=context.cache.clone();let mut queue=candidate.queue.clone();
+ let input=CreationInput{budgets:entry.key.slots.map(|i|owner.hulls[i].budget),properties:context.timing.properties,cached_motion:context.motion,margins:context.margins};
+ let created=Constructor{owner:&mut candidate,queue:&mut queue,clock:context.clock,deadline:context.timing.deadline,dt:context.timing.dt,gravity:context.gravity,config:context.timing.config,face_epsilon:context.timing.face_epsilon,psi_owner:usize::MAX}.created(&mut root,convexes,input,&mut bodies,&mut cache).unwrap();
+ candidate.queue=queue;assert_eq!(created.id,id);assert!(cache.metadata().0.iter().all(|s|s.references==0));(root,created,candidate,bodies)
+}
+#[cfg(test)]
+pub(crate) fn native_lifecycle<'a>(owner:&'a mut Ownership,queue:&'a mut Queue,clock:Clock,timing:Schedule,gravity:[f32;3])->impl Lifecycle+'a{
+ Constructor{owner,queue,clock,deadline:timing.deadline,dt:timing.dt,gravity,config:timing.config,face_epsilon:timing.face_epsilon,psi_owner:usize::MAX}
 }

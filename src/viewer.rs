@@ -403,6 +403,7 @@ fn sample_model_light(
     position: Vec3,
 ) -> ([[f32; 3]; 6], Vec4, Vec4) {
     let cube = model_ambient(world, shadows, position);
+    let _sun = crate::performance::scope("model_lighting::sun");
     let mut direction = Vec4::ZERO;
     let mut color = Vec4::ZERO;
     if let Some(sun) = world.suns.first() {
@@ -423,7 +424,10 @@ pub(crate) fn model_ambient(
     shadows: &crate::lighting::WorldShadow,
     position: Vec3,
 ) -> [[f32; 3]; 6] {
+    let t = crate::performance::scope("model_lighting::field");
     let mut cube = world.ambient_field.sample(position.to_array());
+    drop(t);
+    let t_sky = crate::performance::scope("model_lighting::skylights");
     let axes = [
         Vec3::X,
         Vec3::NEG_X,
@@ -451,6 +455,8 @@ pub(crate) fn model_ambient(
     // The engine's light cache skips world lights outside the sample point's
     // PVS. Without it every sample shadow-traced lights across the whole map
     // (c2m2's ~230 fairground lights: ~80 ms for one view-model sample).
+    drop(t_sky);
+    let _t_local = crate::performance::scope("model_lighting::local");
     let here = world.visibility.cluster_at(position);
     // Cheap tests first; the shadow traces after, across the task pool when
     // many lights remain and this is not already a pool worker (one camera
@@ -639,6 +645,13 @@ fn update_model_lighting(
             if !cache.contains_key(&cell) && seen.insert(cell) {
                 missing.push((cell, position));
             }
+        }
+        // A full cache is cleared (the loop below does the same); draws
+        // that keep their place keep their own sample. Skipping the batch
+        // instead left c2m2's ~2,100 revealed cells to serial sampling once
+        // its ~6,000 earlier cells filled the cache (38 ms frame).
+        if missing.len() > 1 && missing.len() <= 8192 && cache.len() + missing.len() > 8192 {
+            cache.clear();
         }
         if missing.len() > 1 && cache.len() + missing.len() <= 8192 {
             let _timing = crate::performance::scope("model_lighting::parallel_sample");
@@ -996,6 +1009,7 @@ mod world_uv_tests {
             blend: vec![],
             bump: vec![],
             texdata_size: [128., 128.],
+            hull: true,
         };
         // texdata from the 128x128 tool texture; rockwater is 1024x1024.
         assert_eq!(super::world_uv(&surface, Some(&[1024., 1024.])), vec![[1., 0.5]]);
@@ -1938,7 +1952,10 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<SourceMaterial>>,
     mut water_materials: ResMut<Assets<crate::source_water::WaterMaterial>>,
-    mut sun_materials: ResMut<Assets<crate::source_sun::SunMaterial>>,
+    (mut sun_materials, mut standard_materials): (
+        ResMut<Assets<crate::source_sun::SunMaterial>>,
+        ResMut<Assets<StandardMaterial>>,
+    ),
     mut images: ResMut<Assets<Image>>,
     mut exposure_curves: ResMut<Assets<AutoExposureCompensationCurve>>,
     capture: Option<Res<Capture>>,
@@ -1958,6 +1975,43 @@ fn setup(
     // The sky cube samples the decoded skybox faces, so build it before the
     // texels are moved into Bevy images below.
     let sky = sky_image(&map.0);
+    // DecalModulate overlays (c4m3's saferoom graffiti): the framebuffer
+    // times 2 x lerp(0.5, texel, alpha), as bullet_impacts' mod2x decals;
+    // drawn as SourceMaterial they were opaque white sheets.
+    let modulate: HashMap<String, Handle<StandardMaterial>> = map
+        .0
+        .materials
+        .iter()
+        .filter(|(_, m)| m.shader == "decalmodulate")
+        .filter_map(|(name, m)| {
+            let t = map.0.textures.get(m.base.as_ref()?)?;
+            let mut rgba = t.rgba.clone();
+            for px in rgba.chunks_exact_mut(4) {
+                let a = px[3] as f32 / 255.;
+                for c in &mut px[..3] {
+                    let v = 0.5 + (*c as f32 / 255. - 0.5) * a;
+                    *c = (v * 2. * 255.).round().min(255.) as u8;
+                }
+                px[3] = 255;
+            }
+            let image = images.add(Image::new(
+                bevy::render::render_resource::Extent3d { width: t.width, height: t.height, depth_or_array_layers: 1 },
+                bevy::render::render_resource::TextureDimension::D2,
+                rgba,
+                bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+                bevy::asset::RenderAssetUsages::RENDER_WORLD,
+            ));
+            Some((name.clone(), standard_materials.add(StandardMaterial {
+                base_color_texture: Some(image),
+                unlit: true,
+                alpha_mode: AlphaMode::Multiply,
+                cull_mode: None,
+                fog_enabled: false,
+                depth_bias: 1.,
+                ..default()
+            })))
+        })
+        .collect();
     // env_cubemap captures (origin in Source units, material name, cube).
     let cubemaps: Vec<(Vec3, String, Handle<Image>)> = map
         .0
@@ -2138,7 +2192,15 @@ fn setup(
                 bump_map: m.bump.as_ref()
                     .or_else(|| m.cap_phong.as_ref().and_then(|c| c.exponent_texture.as_ref()))
                     .and_then(|p| normal.get(p)).cloned(),
-                blend_texture: m.base2.as_ref().and_then(|p| diffuse.get(p)).cloned(),
+                // Debug: L4D2R_NO_BLEND drops $basetexture2; L4D2R_BLEND_SWAP
+                // blends $basetexture with itself.
+                blend_texture: if std::env::var_os("L4D2R_NO_BLEND").is_some() {
+                    None
+                } else if std::env::var_os("L4D2R_BLEND_SWAP").is_some() {
+                    m.base2.as_ref().and(m.base.as_ref()).and_then(|p| diffuse.get(p)).cloned()
+                } else {
+                    m.base2.as_ref().and_then(|p| diffuse.get(p)).cloned()
+                },
                 blend_modulate: m.blend_modulate.as_ref().and_then(|p| normal.get(p)).cloned(),
                 emission: m.emission_mask.as_ref()
                     .or_else(|| m.cap_phong.as_ref().and_then(|c| c.lightwarp.as_ref()))
@@ -2220,6 +2282,16 @@ fn setup(
                     crate::visibility::Clusters(surface.clusters.clone()),
                     crate::source_water::WaterSurface { sky: surface.sky },
                     Mesh3d(mesh), MeshMaterial3d(water.clone()),
+                    sky_transform(scene, Transform::default(), surface.sky),
+                ));
+                continue;
+            }
+            if let Some(handle) = modulate.get(&surface.material) {
+                commands.spawn((
+                    Name::new(format!("modulate/{}", surface.material)),
+                    crate::visibility::Clusters(surface.clusters.clone()),
+                    Mesh3d(mesh),
+                    MeshMaterial3d(handle.clone()),
                     sky_transform(scene, Transform::default(), surface.sky),
                 ));
                 continue;

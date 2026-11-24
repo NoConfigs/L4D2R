@@ -210,6 +210,15 @@ impl Ownership {
   for side in 0..2{self.hulls[record.objects[side]].remove(record.handles[side])?;}
   self.far.remove(&id);Ok(record)
  }
+ ///10121600 renews a recursive parent's first side, then its second, after
+ /// descendant reconciliation. The retained linear delta is not recomputed.
+ pub(crate) fn rearm_recursive_far(&mut self,id:usize,keys:[f32;2])->Result<(),&'static str>{
+  let record=*self.far.get(&id).ok_or("recursive rearm lacks hull ownership")?;
+  if ((self.graph.flags(id)?>>18)&15)!=4||keys.iter().any(|v|!v.is_finite()){return Err("invalid recursive hull rearm");}
+  self.validate_far(id,record)?;let mut handles=record.handles;
+  for side in 0..2{handles[side]=self.hulls[record.objects[side]].replace(handles[side],keys[side])?;}
+  self.far.insert(id,Far{handles,..record});Ok(())
+ }
  fn validate_far(&self,id:usize,record:Far)->Result<(),&'static str>{
   for side in 0..2{
    let entry=self.hulls[record.objects[side]].entry(record.handles[side]).ok_or("missing contact hull entry")?;

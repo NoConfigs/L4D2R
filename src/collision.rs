@@ -768,7 +768,9 @@ impl Collision {
         self.terrain = world
             .surfaces
             .iter()
-            .filter(|s| s.model == 0 && !s.sky)
+            // "No hull collision" displacements (c13m1's creek water
+            // surface) let players wade through, as in retail.
+            .filter(|s| s.model == 0 && !s.sky && s.hull)
             .flat_map(|s| s.positions.chunks_exact(3))
             .map(|t| {
                 [

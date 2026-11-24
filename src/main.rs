@@ -155,6 +155,7 @@ mod glow_settings;
 mod gpu_writes;
 mod graphics_options;
 mod gun_effects;
+mod precipitation;
 mod hotel_live_test;
 mod infected_death;
 mod infected_appearance;

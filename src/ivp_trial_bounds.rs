@@ -28,11 +28,14 @@ pub(crate) enum DistanceEvent{
     Recheck{pair:usize,objects:[usize;2],object:usize,gap:f32,budgets:[Budget;2]},
     Rebase{pair:usize,objects:[usize;2],object:usize,motion:f32,linear:f32},
 }
-#[derive(Clone,Copy,Debug)]
-pub(crate) enum DistanceAction{Remove,Rearm{keys:[f32;2],first:usize},Activate{replacement:Option<[f32;2]>},ActivateAfterRemoval,Keep}
+#[derive(Clone,Debug)]
+pub(crate) enum DistanceAction{Remove,Rearm{keys:[f32;2],first:usize},Activate{replacement:Option<[f32;2]>},ActivateAfterRemoval,Hierarchy{edits:Vec<DistanceEdit>,keys:Option<[f32;2]>},Keep}
 #[derive(Clone,Copy,Debug)]
 pub(crate) enum DistanceEdit{Register{pair:usize,objects:[usize;2],keys:[f32;2]},Clear{pair:usize}}
 pub(crate) trait Hooks{
+    fn activated_edits(&mut self,pair:usize,objects:[usize;2],budgets:[Budget;2])->Result<Vec<DistanceEdit>,&'static str>{Ok(self.activated(pair,objects,budgets)?.map_or_else(Vec::new,|keys|vec![DistanceEdit::Register{pair,objects,keys}]))}
+    fn distance_dependencies(&self,_pair:usize)->Result<Vec<usize>,&'static str>{Ok(vec![])}
+    fn distance_with_keys(&mut self,event:DistanceEvent,_keys:&[(usize,[f32;2])])->Result<DistanceAction,&'static str>{self.distance(event)}
     fn activated(&mut self,_pair:usize,_objects:[usize;2],_budgets:[Budget;2])->Result<Option<[f32;2]>,&'static str>{Err("post-removal distance activation provider is missing")}
     fn geometry(&mut self,_pair:usize,_objects:[usize;2],_margin:f32,_budgets:[Budget;2])->Result<Vec<DistanceEdit>,&'static str>{Ok(vec![])}
     fn removed(&mut self,_pair:usize,_objects:[usize;2])->Result<Vec<DistanceEdit>,&'static str>{Ok(vec![])}
@@ -48,6 +51,14 @@ pub(crate) struct Prediction{pub object:usize,pub center:[f32;3],pub linear:f32,
 /// One queued hull dispatch, produced during prediction and consumed once.
 pub(crate) struct Prepared{object:usize,now:f64,due:bool}
 impl World{
+    #[cfg(test)]
+    pub(crate) fn callback_budget_inputs(&mut self,object:usize,inputs:Budget){let m=self.objects[object].manager.as_mut().unwrap();m.set_motion_inputs(inputs);}
+    #[cfg(test)]
+    pub(crate) fn callback_hull_state(&self,object:usize)->(u32,Vec<usize>){let o=&self.objects[object];let m=o.manager.as_ref().unwrap();(m.entry(o.broad).unwrap().1.to_bits(),m.ordered_keys().iter().filter_map(|(_,owner,_)|(owner&DISTANCE!=0&&*owner!=BROAD).then_some(owner&!DISTANCE)).collect())}
+    #[cfg(test)]
+    pub(crate) fn recheck_distance_for_test(&mut self,pair:usize,side:usize,hooks:&mut dyn Hooks)->Result<Vec<Request>,&'static str>{self.recheck_distance_with_gap_for_test(pair,side,None,hooks)}
+    #[cfg(test)]
+    pub(crate) fn recheck_distance_with_gap_for_test(&mut self,pair:usize,side:usize,gap_override:Option<f32>,hooks:&mut dyn Hooks)->Result<Vec<Request>,&'static str>{let id=self.distances[pair].as_ref().unwrap().objects[side];let mut m=self.objects[id].manager.take().ok_or("test callback manager is borrowed")?;let gap=gap_override.unwrap_or(m.budget.threshold-m.budget.predicted);let mut requests=vec![];let result=self.recheck_distance_inside(pair,id,&mut m,gap,hooks,&mut requests);self.objects[id].manager=Some(m);result?;Ok(requests)}
     #[cfg(test)]
     pub(crate) fn distance_keys(&self,id:usize)->Result<[f32;2],&'static str>{
         let p=self.distances.get(id).and_then(Option::as_ref).ok_or("unknown detailed distance")?;
@@ -185,17 +196,11 @@ impl World{
         for p in prepared.into_iter().rev(){requests.extend(self.dispatch_prediction(p,hooks)?);}
         Ok(requests)
     }
-    fn dispatch_prediction(&mut self,prepared:Prepared,hooks:&mut dyn Hooks)->Result<Vec<Request>,&'static str>{
-        let Prepared{object:id,now,due}=prepared;
-        let mut m=self.objects.get_mut(id).ok_or("unknown prepared bounds object")?.manager.take().ok_or("prepared bounds dispatch is reentrant")?;
-        let mut requests=Vec::new();let mut quota=false;
-        let before=m.budget;let policy_dt=self.dt;
-        let mut result=if due{m.dispatch(250,|m,n|{
-            if n.owner==BROAD{self.broadphase(id,m,now,policy_dt,&mut requests,hooks)}
-            else if n.owner&DISTANCE!=0{
-                let pair=n.owner&!DISTANCE;let p=self.distances.get(pair).and_then(Option::as_ref).ok_or("missing distance listener")?;let objects=p.objects;let handles=p.handles;
-                let budgets=objects.map(|object|self.budget(object,id,m));
-                match hooks.distance(DistanceEvent::Recheck{pair,objects,object:id,gap:n.a,budgets})?{
+    fn recheck_distance_inside(&mut self,pair:usize,id:usize,m:&mut Manager,gap:f32,hooks:&mut dyn Hooks,requests:&mut Vec<Request>)->Result<(),&'static str>{
+        let p=self.distances.get(pair).and_then(Option::as_ref).ok_or("missing distance listener")?;let objects=p.objects;let handles=p.handles;
+        let budgets=objects.map(|object|self.budget(object,id,m));let dependencies=hooks.distance_dependencies(pair)?;let mut seen=std::collections::BTreeSet::new();let mut keys=vec![];
+        for child in dependencies{if !seen.insert(child){return Err("duplicate recursive distance dependency");}let d=self.distances.get(child).and_then(Option::as_ref).ok_or("recursive dependency lacks distance registration")?;let values=std::array::from_fn::<_,2,_>(|side|{let object=d.objects[side];let manager=if object==id{&*m}else{self.objects[object].manager.as_ref().ok_or("recursive dependency manager is borrowed")?};manager.entry(d.handles[side]).map(|(_,key)|key).ok_or("recursive dependency lost hull handle")});let [a,b]=values;keys.push((child,[a?,b?]));}
+                match hooks.distance_with_keys(DistanceEvent::Recheck{pair,objects,object:id,gap,budgets},&keys)?{
                     DistanceAction::Remove=>{self.remove(objects[0],id,m,handles[0])?;self.remove(objects[1],id,m,handles[1])?;self.distances[pair]=None;requests.push(Request::Distance{pair,objects});},
                     DistanceAction::Rearm{keys,first}=>{
                         if first>1||keys.iter().any(|v|!v.is_finite()){return Err("invalid synchronous distance rearm");}
@@ -210,11 +215,27 @@ impl World{
                     DistanceAction::ActivateAfterRemoval=>{
                         self.clear_inside(pair,id,m)?;
                         let budgets=objects.map(|object|self.budget(object,id,m));
-                        if let Some(keys)=hooks.activated(pair,objects,budgets)?{self.register_inside(pair,objects,keys,id,m)?;}
+                        let edits=hooks.activated_edits(pair,objects,budgets)?;self.edits(edits,id,m)?;
                         requests.push(Request::Distance{pair,objects});
+                    },
+                    DistanceAction::Hierarchy{edits,keys}=>{
+                        if edits.iter().any(|edit|match edit{DistanceEdit::Register{pair:child,..}|DistanceEdit::Clear{pair:child}=>*child==pair})||keys.is_some_and(|k|k.iter().any(|v|!v.is_finite())){return Err("invalid recursive distance edits");}
+                        self.edits(edits,id,m)?;
+                        if let Some(keys)=keys{let mut renewed=handles;for side in 0..2{renewed[side]=self.replace(objects[side],id,m,handles[side],keys[side])?;}self.distances[pair].as_mut().unwrap().handles=renewed;}
+                        else{self.clear_inside(pair,id,m)?;requests.push(Request::Distance{pair,objects});}
                     },
                     DistanceAction::Keep=>return Err("due distance listener was not advanced"),
                 }Ok(())
+    }
+    fn dispatch_prediction(&mut self,prepared:Prepared,hooks:&mut dyn Hooks)->Result<Vec<Request>,&'static str>{
+        let Prepared{object:id,now,due}=prepared;
+        let mut m=self.objects.get_mut(id).ok_or("unknown prepared bounds object")?.manager.take().ok_or("prepared bounds dispatch is reentrant")?;
+        let mut requests=Vec::new();let mut quota=false;
+        let before=m.budget;let policy_dt=self.dt;
+        let mut result=if due{m.dispatch(250,|m,n|{
+            if n.owner==BROAD{self.broadphase(id,m,now,policy_dt,&mut requests,hooks)}
+            else if n.owner&DISTANCE!=0{
+                self.recheck_distance_inside(n.owner&!DISTANCE,id,m,n.a,hooks,&mut requests)
             }else{self.renew_pair(n.owner,id,m,now,policy_dt,&mut requests,hooks)}
         },|_|{quota=true;0}).map(|_|())}else{Ok(())};
         if due&&result.is_ok(){requests.push(Request::Dispatch{object:id,before,after:m.budget});}
@@ -249,6 +270,29 @@ impl World{
 
 #[cfg(test)]
 mod tests{
+    #[test]
+    fn recursive_edits_preserve_unrelated_listeners_with_either_manager_borrowed(){
+        struct Edit;
+        impl Hooks for Edit{
+            fn distance_dependencies(&self,_:usize)->Result<Vec<usize>,&'static str>{Ok(vec![7,8,9])}
+            fn distance_with_keys(&mut self,_:DistanceEvent,keys:&[(usize,[f32;2])])->Result<DistanceAction,&'static str>{
+                assert_eq!(keys.iter().map(|(id,_)|*id).collect::<Vec<_>>(),vec![7,8,9]);
+                assert_eq!(keys[1].1,[100.;2]);
+                Ok(DistanceAction::Hierarchy{edits:vec![DistanceEdit::Register{pair:10,objects:[0,1],keys:[2.,3.]},DistanceEdit::Clear{pair:9}],keys:Some([5.,6.])})
+            }
+        }
+        struct Collapse;
+        impl Hooks for Collapse{fn distance(&mut self,_:DistanceEvent)->Result<DistanceAction,&'static str>{Ok(DistanceAction::Hierarchy{edits:vec![DistanceEdit::Clear{pair:8},DistanceEdit::Clear{pair:10}],keys:None})}}
+        for side in 0..2{
+            let mut w=World::new(vec![Object::new(0,1,false,1.,[0.;3]),Object::new(1,1,false,1.,[0.;3])],&[0,1],0.015).unwrap();
+            for (pair,keys) in [(7,[-1.;2]),(8,[100.;2]),(9,[200.;2])]{w.register_distance(pair,[0,1],keys).unwrap();}
+            let broad=[w.callback_hull_state(0).0,w.callback_hull_state(1).0];
+            w.recheck_distance_for_test(7,side,&mut Edit).unwrap();assert_eq!(w.distance_keys(7).unwrap(),[5.,6.]);assert_eq!(w.distance_keys(8).unwrap(),[100.;2]);assert!(w.distance_keys(9).is_err());assert_eq!(w.distance_keys(10).unwrap(),[2.,3.]);
+            for i in 0..2{assert_eq!(w.callback_hull_state(i),(broad[i],vec![10,7,8]));}
+            let requests=w.recheck_distance_for_test(7,side,&mut Collapse).unwrap();assert_eq!(requests.len(),1);
+            for i in 0..2{assert_eq!(w.callback_hull_state(i),(broad[i],vec![]));}
+        }
+    }
     use super::*;
     #[test]
     fn distance_activation_constructor_observes_both_old_listeners_removed(){

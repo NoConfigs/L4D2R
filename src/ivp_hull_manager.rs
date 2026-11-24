@@ -53,6 +53,10 @@ pub(crate) struct Manager {
     entries: Vec<Entry>, free: u16, head: u16, skip_head: u16, count: usize,
 }
 impl Manager {
+    /// Copy motion-provider state without replacing this list's head threshold.
+    /// An empty auxiliary list still owns its empty sentinel, even when the
+    /// source manager already contains broad or detailed listeners.
+    pub(crate) fn set_motion_inputs(&mut self,inputs:Budget){let threshold=self.budget.threshold;self.budget=inputs;self.budget.threshold=threshold;}
     pub(crate) fn due(&self)->Result<Option<Notice>,&'static str>{
         let gap=self.budget.threshold-self.budget.predicted;
         if gap>=0.{return Ok(None);}

@@ -1,6 +1,8 @@
 //! Native10121950 split selection and10121510 recursive admission requests.
 //! Graph transitions/provider callbacks remain with the owning world.
 use super::*;
+#[path="ivp_recursive_constructor.rs"]
+pub(crate) mod construction;
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub(crate) struct Plan{pub split:usize,pub provided:[Option<usize>;2],pub restricted:[Option<usize>;2]}
 pub(crate) fn plan(coarse:[bool;2],radii:[Option<f32>;2],ledges:[usize;2],count:i32,limit:i32,fallback:f32)->Result<Option<Plan>,&'static str>{
@@ -31,13 +33,39 @@ pub(crate) fn contact_plan(i:ContactInput)->Result<ContactPlan,&'static str>{
 }
 pub(crate) enum ContactOutcome{Physical,Expanded(Changes)}
 impl<'a> Entry<'a>{
- pub(crate) fn expand(&mut self,input:Input,root:&Counter,limit:i32,fallback:f32,initialize:impl FnMut(&Pair,&mut Entry<'a>,[&Convex;2])->Result<(),&'static str>,retire:impl FnMut(&Pair,&mut Entry<'a>)->Result<(),&'static str>)->Result<Option<Changes>,&'static str>{
-    let recursive=self.recursive.as_mut().ok_or("leaf contact cannot expand recursively")?;
+ ///10121950's parent ownership transition. The caller stages this entry,
+ /// its counter forest and graph/hull owner together before invoking callbacks.
+ #[allow(clippy::too_many_arguments)]
+ pub(crate) fn expand_registered(
+  &mut self,owner:&mut ownership::Ownership,id:usize,input:Input,root:&Counter,limit:i32,fallback:f32,
+  flags:[u32;2],motion:[[f32;2];2],linear_delta:f32,
+  mut initialize:impl FnMut(&mut ownership::Ownership,&Pair,&mut Entry<'a>,[&Convex;2])->Result<(),&'static str>,
+  mut retire:impl FnMut(&mut ownership::Ownership,&Pair,&mut Entry<'a>)->Result<(),&'static str>,
+ )->Result<Option<Changes>,&'static str>{
+  if owner.graph.objects(id)?!=self.key.slots||owner.graph.flags(id)?!=self.contact.flags||!owner.graph.active().contains(&id){return Err("recursive expansion requires matching active parent ownership");}
+  let plan=self.expansion_plan(root,limit,fallback)?;
+  if owner.queue.scheduled(id).is_some(){owner.queue.cancel(id)?;}
+  let Some(plan)=plan else{owner.graph.make_inactive(id)?;self.contact.flags=owner.graph.flags(id)?;return Ok(None);};
+  let predicted=self.key.slots.map(|o|owner.hulls[o].budget.predicted);
+  let keys=crate::ivp_distance_schedule::auxiliary_hull_keys(predicted,flags,motion,input.margin)?;
+  owner.graph.unlink(id)?;self.contact.flags=(self.contact.flags&0xffd7ffff)|0x140000;owner.graph.set_flags(id,self.contact.flags)?;
+  owner.track_far(id,keys,linear_delta)?;
+  // Native changes phase5 to recursive phase4 before the first child callback.
+  self.contact.flags=(self.contact.flags&0xffd3ffff)|0x100000;owner.graph.set_flags(id,self.contact.flags)?;
+  let owner=std::cell::RefCell::new(owner);
+  self.apply_plan(input,root,plan,|k,e,c|initialize(&mut owner.borrow_mut(),k,e,c),|k,e|retire(&mut owner.borrow_mut(),k,e)).map(Some)
+ }
+ fn expansion_plan(&self,root:&Counter,limit:i32,fallback:f32)->Result<Option<Plan>,&'static str>{
+    let recursive=self.recursive.as_ref().ok_or("leaf contact cannot expand recursively")?;
     let trees=recursive.descendants.solids.map(|s|s.compact_tree.as_deref().ok_or("missing recursive surface tree"));let trees=[trees[0]?,trees[1]?];
     let coarse=std::array::from_fn::<_,2,_>(|j|trees[j].ledge_headers.get(&self.key.ledges[j]).map(|h|h[8]&3!=0).ok_or("missing recursive parent ledge"));let coarse=[coarse[0]?,coarse[1]?];
     let radii=std::array::from_fn(|j|trees[j].ledge_nodes.get(&self.key.ledges[j]).and_then(|n|trees[j].nodes.get(*n)).map(|n|n.radius));
     let global=root.load(Ordering::Relaxed);let effective=if global>0{global}else{recursive.count.load(Ordering::Relaxed)};
-    let Some(plan)=plan(coarse,radii,self.key.ledges,effective,limit,fallback)?else{return Ok(None);};
+    plan(coarse,radii,self.key.ledges,effective,limit,fallback)
+ }
+
+ pub(crate) fn expand(&mut self,input:Input,root:&Counter,limit:i32,fallback:f32,initialize:impl FnMut(&Pair,&mut Entry<'a>,[&Convex;2])->Result<(),&'static str>,retire:impl FnMut(&Pair,&mut Entry<'a>)->Result<(),&'static str>)->Result<Option<Changes>,&'static str>{
+    let Some(plan)=self.expansion_plan(root,limit,fallback)?else{return Ok(None);};
     self.apply_plan(input,root,plan,initialize,retire).map(Some)
  }
  fn apply_plan(&mut self,mut input:Input,root:&Counter,plan:Plan,initialize:impl FnMut(&Pair,&mut Entry<'a>,[&Convex;2])->Result<(),&'static str>,retire:impl FnMut(&Pair,&mut Entry<'a>)->Result<(),&'static str>)->Result<Changes,&'static str>{

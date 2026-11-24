@@ -11,21 +11,32 @@ pub(crate) struct Object<'a>{pub id:usize,pub core:usize,pub solid:&'a PhySolid,
 #[path="ivp_compact_owner.rs"]
 pub(crate) mod owner;
 pub(crate) type FarRegistration=([f32;2],f32);
-pub(crate) struct Created{pub id:usize,pub far:Option<FarRegistration>}
-pub(crate) trait Lifecycle{
- fn created(&mut self,entry:&mut Entry<'_>,convexes:[&Convex;2],budgets:[Budget;2],motion:[crate::ivp_minimizer::owner::Properties;2],bodies:&mut[Body;2],cache:&mut WorldCache)->Result<Created,&'static str>;
- fn reactivated(&mut self,_id:usize,_entry:&mut Entry<'_>,_convexes:[&Convex;2],_budgets:[Budget;2],_motion:[crate::ivp_minimizer::owner::Properties;2],_bodies:&mut[Body;2],_cache:&mut WorldCache)->Result<Option<FarRegistration>,&'static str>{Err("compact far reactivation provider is missing")}
- fn retired(&mut self,id:usize,entry:&mut Entry<'_>)->Result<(),&'static str>;
-}
+#[derive(Clone)]
+pub(crate) struct Descendant{pub id:usize,pub path:Vec<crate::ivp_surface_admission::Pair>,pub far:Option<FarRegistration>}
+#[derive(Clone)]
+pub(crate) struct Created{pub id:usize,pub far:Option<FarRegistration>,pub descendants:Vec<Descendant>}
 #[derive(Clone,Copy)]
-struct Location{broad:usize,key:crate::ivp_surface_admission::Pair}
+pub(crate) struct CreationInput{pub budgets:[Budget;2],pub properties:[crate::ivp_minimizer::owner::Properties;2],pub cached_motion:[[f32;2];2],pub margins:[f32;2]}
+pub(crate) struct RecursiveInput{pub creation:CreationInput,pub root:super::Counter,pub bindings:Vec<super::recursion::construction::Binding>,pub far:Vec<(usize,FarRegistration)>}
+#[path="ivp_compact_hierarchy.rs"]
+pub(super) mod hierarchy;
+pub(crate) trait Lifecycle{
+ fn reactivate_recursive(&mut self,_id:usize,_entry:&mut Entry<'_>,_convexes:[&Convex;2],_input:RecursiveInput,_bodies:&mut[Body;2],_cache:&mut WorldCache)->Result<Created,&'static str>{Err("recursive reactivation provider is missing")}
+ fn recursive(&mut self,_id:usize,_entry:&mut Entry<'_>,_convexes:[&Convex;2],_input:RecursiveInput,_bodies:&mut[Body;2],_cache:&mut WorldCache)->Result<Created,&'static str>{Err("recursive far lifecycle provider is missing")}
+ fn created(&mut self,entry:&mut Entry<'_>,convexes:[&Convex;2],input:CreationInput,bodies:&mut[Body;2],cache:&mut WorldCache)->Result<Created,&'static str>;
+ fn reactivated(&mut self,_id:usize,_entry:&mut Entry<'_>,_convexes:[&Convex;2],_budgets:[Budget;2],_motion:[crate::ivp_minimizer::owner::Properties;2],_bodies:&mut[Body;2],_cache:&mut WorldCache)->Result<Option<FarRegistration>,&'static str>{Err("compact far reactivation provider is missing")}
+ fn retired(&mut self,id:usize,entry:&mut Entry<'_>,descendants:&[super::recursion::construction::Binding])->Result<(),&'static str>;
+}
+#[derive(Clone)]
+struct Location{broad:usize,key:crate::ivp_surface_admission::Pair,path:Vec<crate::ivp_surface_admission::Pair>}
 pub(crate) struct Discovery<'a>{world:bounds::World,objects:BTreeMap<usize,Object<'a>>,order:Vec<usize>,motion:BTreeMap<usize,crate::ivp_minimizer::owner::Properties>,far:BTreeMap<usize,f32>,coarse:BTreeMap<usize,Contacts<'a>>,locations:BTreeMap<usize,Location>,ledges:BTreeMap<(usize,usize),u32>,dt:f32}
 
 impl<'a> Discovery<'a>{
+ pub(crate) fn has_recursive_contacts(&self)->bool{self.coarse.values().any(|c|c.entries().iter().any(|e|e.recursive.is_some()))}
  #[cfg(test)]
  pub(crate) fn query_snapshot(&self,owner:&super::ownership::Ownership,queue:&crate::ivp_event_queue::Queue)->Result<serde_json::Value,&'static str>{
   let mut rows=vec![];
-  for (&id,loc) in &self.locations{let entry=self.coarse[&loc.broad].entries().iter().find(|e|e.key==loc.key).ok_or("diagnostic compact entry missing")?;let q=&entry.contact.query;
+  for (&id,loc) in &self.locations{let entry=self.coarse[&loc.broad].entry_at_path(&loc.path)?;let q=&entry.contact.query;
    rows.push(serde_json::json!({"id":id,"objects":owner.graph.objects(id)?.map(|i|i-1),"flags":entry.contact.flags,"kinds":q.kinds,"frame":q.frame,"geometry":q.geometry.map(|g|[g.projection.to_bits(),g.distance.to_bits(),g.normal.x.to_bits(),g.normal.y.to_bits(),g.normal.z.to_bits()]),"queue":queue.scheduled(id).map(|(epoch,key)|[epoch.to_bits(),key.to_bits() as u64])}));
   }Ok(serde_json::json!(rows))
  }
@@ -56,7 +67,28 @@ impl<'a> Discovery<'a>{
  }
  #[cfg(test)]
  fn entry_read(&self,id:usize)->&Entry<'a>{
-  let loc=self.locations[&id];let entry=self.coarse[&loc.broad].entries().iter().find(|e|e.key==loc.key).unwrap();entry
+  let loc=self.locations[&id].clone();let entry=self.coarse[&loc.broad].entry_at_path(&loc.path).unwrap();entry
+ }
+ #[cfg(test)]
+ pub(crate) fn assert_native_tree_paths(forest:Contacts<'a>,bodies:&[Body]){
+  use crate::ivp_surface_admission::Pair;
+  fn paths(entries:&[Entry<'_>],prefix:&mut Vec<Pair>,out:&mut Vec<Vec<Pair>>){for entry in entries{prefix.push(entry.key);out.push(prefix.clone());if let Some(r)=&entry.recursive{paths(r.descendants.entries(),prefix,out);}prefix.pop();}}
+  let solids=forest.solids;let objects=forest.objects;let mut found=vec![];paths(forest.entries(),&mut vec![],&mut found);assert!(!found.is_empty());
+  let definitions=(0..2).map(|core|Object{id:objects[core],core,solid:solids[core],margin:0.,core_radius:1.,core_angular_radius:0.,cached_motion:[0.;2]}).collect();
+  let mut discovery=Self::new(definitions,&objects,bodies,1./60.).unwrap();let broad=123;
+  discovery.coarse.insert(broad,forest);discovery.locations.insert(0,Location{broad,key:found[0][0],path:found[0].clone()});
+  let mut ids=vec![(found[0].clone(),0)];
+  for (id,path) in found.iter().enumerate().skip(1){let parent=ids.iter().find(|(p,_)|p.as_slice()==&path[..path.len()-1]).unwrap().1;discovery.bind_descendant(parent,id,&path[path.len()-1..]).unwrap();ids.push((path.clone(),id));}
+  for (path,id) in &ids{
+   let expected=discovery.coarse[&broad].entry_at_path(path).unwrap();let before=(expected.key,expected.contact.flags,expected.contact.query.kinds);
+   let (entry,convexes,keys)=discovery.entry_mut(*id).unwrap();assert_eq!((entry.key,entry.contact.flags,entry.contact.query.kinds),before);
+   for side in 0..2{assert!(std::ptr::eq(convexes[side],solids[side].compact_ledge(entry.key.ledges[side]).unwrap()));assert!(keys[side]>0);}
+   entry.contact.flags^=0x80000000;assert_eq!(discovery.coarse[&broad].entry_at_path(path).unwrap().contact.flags,before.1^0x80000000);discovery.entry_mut(*id).unwrap().0.contact.flags=before.1;
+  }
+  let size=discovery.locations.len();assert!(discovery.bind_descendant(0,0,&found[0]).is_err());assert!(discovery.bind_descendant(0,size,&[]).is_err());
+  if let Some((path,_))=ids.iter().find(|(p,_)|p.len()>1){assert!(discovery.bind_descendant(0,size,&path[1..]).is_err());}
+  assert_eq!(discovery.locations.len(),size);
+  let mut candidate=discovery.snapshot_with_counters(&mut super::CounterSnapshot::default());let (path,id)=ids.last().unwrap();let old=discovery.coarse[&broad].entry_at_path(path).unwrap().contact.flags;candidate.entry_mut(*id).unwrap().0.contact.flags^=0x80000000;assert_eq!(discovery.coarse[&broad].entry_at_path(path).unwrap().contact.flags,old);
  }
  pub(crate) fn new(objects:Vec<Object<'a>>,order:&[usize],bodies:&[Body],dt:f32)->Result<Self,&'static str>{
   if bodies.is_empty()||objects.is_empty()||order.len()!=objects.len(){return Err("invalid compact discovery registration");}
@@ -124,11 +156,22 @@ impl<'a> Discovery<'a>{
   cache.detach(id)?;Ok(requests)
  }
  pub(crate) fn entry_mut(&mut self,id:usize)->Result<(&mut Entry<'a>,[&'a Convex;2],[u32;2]),&'static str>{
-  let loc=*self.locations.get(&id).ok_or("unknown discovered compact child")?;
+  let loc=self.locations.get(&id).cloned().ok_or("unknown discovered compact child")?;
   let convexes=std::array::from_fn::<_,2,_>(|s|self.objects[&loc.key.slots[s]].solid.compact_ledge(loc.key.ledges[s]).ok_or("discovered compact ledge disappeared"));let [a,b]=convexes;
   let keys=std::array::from_fn::<_,2,_>(|s|self.ledges.get(&(loc.key.slots[s],loc.key.ledges[s])).copied().ok_or("discovered ledge lacks feature arena identity"));let [ka,kb]=keys;
-  let entry=self.coarse.get_mut(&loc.broad).ok_or("discovered child lost parent")?.entries_mut().iter_mut().find(|e|e.key==loc.key).ok_or("discovered child lost entry")?;
+  let entry=self.coarse.get_mut(&loc.broad).ok_or("discovered child lost parent")?.entry_at_path_mut(&loc.path)?;
   Ok((entry,[a?,b?],[ka?,kb?]))
+ }
+ /// Bind a constructed descendant after its tree update commits. Paths are
+ /// relative to the parent, so repeated leaf ledges retain distinct ancestry.
+ pub(crate) fn bind_descendant(&mut self,parent:usize,id:usize,relative:&[crate::ivp_surface_admission::Pair])->Result<(),&'static str>{
+  if relative.is_empty()||self.locations.contains_key(&id){return Err("empty or duplicate descendant identity");}
+  let parent=self.locations.get(&parent).ok_or("unregistered recursive parent identity")?;
+  let mut path=parent.path.clone();path.extend_from_slice(relative);
+  let entry=self.coarse.get(&parent.broad).ok_or("recursive parent lost coarse ownership")?.entry_at_path(&path)?;
+  if entry.key.slots!=parent.key.slots||self.locations.values().any(|l|l.broad==parent.broad&&l.path==path){return Err("descendant location differs or is already bound");}
+  for side in 0..2{if !self.ledges.contains_key(&(entry.key.slots[side],entry.key.ledges[side])){return Err("descendant ledge lacks feature identity");}}
+  self.locations.insert(id,Location{broad:parent.broad,key:entry.key,path});Ok(())
  }
  /// Consume a popped event through the authoritative world queue. Geometry
  /// recovery writes back to the caller's canonical bank, including on failure;
@@ -230,17 +273,45 @@ impl<'a> Discovery<'a>{
 
 struct Dispatch<'a,'b>{dt:f32,motion:&'b BTreeMap<usize,crate::ivp_minimizer::owner::Properties>,far:&'b mut BTreeMap<usize,f32>,objects:&'b BTreeMap<usize,Object<'a>>,coarse:&'b mut BTreeMap<usize,Contacts<'a>>,locations:&'b mut BTreeMap<usize,Location>,bodies:&'b mut[Body],cache:&'b mut WorldCache,clock:Clock,lifecycle:&'b mut dyn Lifecycle}
 impl bounds::Hooks for Dispatch<'_,'_>{
+ fn distance_dependencies(&self,id:usize)->Result<Vec<usize>,&'static str>{
+  let loc=self.locations.get(&id).ok_or("distance dependency parent lost identity")?;let entry=self.coarse.get(&loc.broad).ok_or("distance dependency parent lost coarse owner")?.entry_at_path(&loc.path)?;
+  if entry.recursive.is_none()||((entry.contact.flags>>18)&15)!=4{return Ok(vec![]);}
+  Ok(self.locations.iter().filter_map(|(&child,l)|(l.broad==loc.broad&&l.path.starts_with(&loc.path)&&self.far.contains_key(&child)).then_some(child)).collect())
+ }
+ fn distance_with_keys(&mut self,event:bounds::DistanceEvent,keys:&[(usize,[f32;2])])->Result<bounds::DistanceAction,&'static str>{
+  let bounds::DistanceEvent::Recheck{pair:id,objects,budgets,..}=event else{return self.distance(event);};
+  let loc=self.locations.get(&id).cloned().ok_or("recursive distance parent lost identity")?;
+  let forest=self.coarse.get(&loc.broad).ok_or("recursive distance parent lost coarse owner")?;let entry=forest.entry_at_path(&loc.path)?;
+  if entry.recursive.is_none()||((entry.contact.flags>>18)&15)!=4{return self.distance(event);}
+  if objects!=loc.key.slots{return Err("recursive distance endpoint order differs");}
+  let keys=keys.iter().copied().collect::<BTreeMap<_,_>>();
+  let root=forest.entry_at_path(&loc.path[..1])?.recursive.as_ref().ok_or("recursive ancestry lost top counter")?.count.clone();
+  let paths=hierarchy::retirement_paths(entry);let mut previous=vec![];
+  let mut by_path=self.locations.iter().filter(|(_,l)|l.broad==loc.broad&&l.path.starts_with(&loc.path)).map(|(&id,l)|(l.path.iter().map(|p|(p.slots,p.ledges)).collect::<Vec<_>>(),(id,l.clone()))).collect::<BTreeMap<_,_>>();
+  for path in paths{let mut full=loc.path[..loc.path.len()-1].to_vec();full.extend(path);let (child,l)=by_path.remove(&full.iter().map(|p|(p.slots,p.ledges)).collect::<Vec<_>>()).ok_or("recursive distance hierarchy lacks descendant identity")?;
+   let far=if let Some(&delta)=self.far.get(&child){Some((*keys.get(&child).ok_or("recursive distance dependency omitted hull keys")?,delta))}else{None};
+   previous.push(hierarchy::Previous{id:child,location:l,far});
+  }
+  if !by_path.is_empty(){return Err("recursive distance hierarchy has stale locations");}
+  let bindings=previous.iter().filter(|p|p.id!=id).map(|p|super::recursion::construction::Binding{id:p.id,path:p.location.path[loc.path.len()-1..].to_vec()}).collect();
+  let definitions=objects.map(|o|self.objects[&o]);let cores=definitions.map(|o|o.core);
+  let convexes=std::array::from_fn::<_,2,_>(|i|definitions[i].solid.compact_ledge(loc.key.ledges[i]).ok_or("recursive distance lost compact ledge"));let [a,b]=convexes;
+  let input=RecursiveInput{creation:CreationInput{budgets,properties:objects.map(|o|self.motion[&o]),cached_motion:definitions.map(|o|o.cached_motion),margins:definitions.map(|o|o.margin)},root,bindings,far:previous.iter().filter_map(|p|p.far.map(|far|(p.id,far))).collect()};
+  let mut pair=cores.map(|c|self.bodies[c]);let entry=self.coarse.get_mut(&loc.broad).unwrap().entry_at_path_mut(&loc.path)?;
+  let result=self.lifecycle.recursive(id,entry,[a?,b?],input,&mut pair,self.cache);for i in 0..2{self.bodies[cores[i]]=pair[i];}
+  hierarchy::reconcile(id,&loc,entry,result?,&previous,self.locations,self.far)
+ }
  fn distance(&mut self,event:bounds::DistanceEvent)->Result<bounds::DistanceAction,&'static str>{
   use crate::ivp_far_distance as far;
   let id=match event{bounds::DistanceEvent::Recheck{pair,..}|bounds::DistanceEvent::Rebase{pair,..}=>pair};
-  let loc=*self.locations.get(&id).ok_or("far listener lost compact child")?;
+  let loc=self.locations.get(&id).cloned().ok_or("far listener lost compact child")?;
   let delta=self.far.get_mut(&id).ok_or("far listener lacks retained linear delta")?;
   if let bounds::DistanceEvent::Rebase{motion,linear,..}=event{*delta=(motion-linear)+*delta;return Ok(bounds::DistanceAction::Keep);}
   let bounds::DistanceEvent::Recheck{objects,gap,budgets,..}=event else{unreachable!()};
   if objects!=loc.key.slots{return Err("far listener object order differs");}
   let definitions=objects.map(|s|self.objects[&s]);
-  let entry=self.coarse.get_mut(&loc.broad).ok_or("far child lost parent")?.entries_mut().iter_mut().find(|e|e.key==loc.key).ok_or("far child disappeared")?;
-  if entry.recursive.is_some(){return Err("recursive compact far callback is not connected");}
+  let entry=self.coarse.get_mut(&loc.broad).ok_or("far child lost parent")?.entry_at_path_mut(&loc.path)?;
+  if entry.recursive.as_ref().is_some_and(|r|((entry.contact.flags>>18)&15)!=5||!r.descendants.entries().is_empty()){return Err("recursive compact far recheck requires a childless phase5 parent");}
   let geometry=entry.contact.query.geometry.ok_or("far contact lacks retained geometry")?;
   let input=far::Input{flags:entry.contact.flags,now:self.clock.time,dt:self.dt,gap,geometry:far::Geometry{projection:geometry.projection,linear_delta:*delta,distance:geometry.distance,normal:geometry.normal},cores:definitions.map(|o|{let b=self.bodies[o.core];far::Core{time:b.prediction.time,start:b.prediction.start,velocity:b.prediction.velocity,linear:o.cached_motion[0],angular:o.cached_motion[1]}}),budgets};
   match far::update(&input,far::Config::default())?{
@@ -251,12 +322,30 @@ impl bounds::Hooks for Dispatch<'_,'_>{
    far::Action::Activate{pending:false}=>Ok(bounds::DistanceAction::ActivateAfterRemoval)
   }
  }
+ fn activated_edits(&mut self,id:usize,objects:[usize;2],budgets:[Budget;2])->Result<Vec<bounds::DistanceEdit>,&'static str>{
+  let loc=self.locations.get(&id).cloned().ok_or("reactivated compact parent lost identity")?;
+  let forest=self.coarse.get(&loc.broad).ok_or("reactivated compact parent lost coarse owner")?;
+  if forest.entry_at_path(&loc.path)?.recursive.is_none(){return Ok(self.activated(id,objects,budgets)?.map_or_else(Vec::new,|keys|vec![bounds::DistanceEdit::Register{pair:id,objects,keys}]));}
+  if objects!=loc.key.slots||!self.far.contains_key(&id)||self.locations.values().filter(|l|l.broad==loc.broad&&l.path.starts_with(&loc.path)).count()!=1{return Err("recursive reactivation has stale child or far ownership");}
+  let root=forest.entry_at_path(&loc.path[..1])?.recursive.as_ref().ok_or("reactivated recursive ancestry lost its counter")?.count.clone();
+  let definitions=objects.map(|o|self.objects[&o]);let cores=definitions.map(|o|o.core);
+  let [a,b]=std::array::from_fn::<_,2,_>(|i|definitions[i].solid.compact_ledge(loc.key.ledges[i]).ok_or("recursive reactivation lost compact ledge"));
+  let input=RecursiveInput{creation:CreationInput{budgets,properties:objects.map(|o|self.motion[&o]),cached_motion:definitions.map(|o|o.cached_motion),margins:definitions.map(|o|o.margin)},root,bindings:vec![],far:vec![]};
+  let entry=self.coarse.get_mut(&loc.broad).unwrap().entry_at_path_mut(&loc.path)?;let mut pair=cores.map(|c|self.bodies[c]);
+  let result=self.lifecycle.reactivate_recursive(id,entry,[a?,b?],input,&mut pair,self.cache);for i in 0..2{self.bodies[cores[i]]=pair[i];}
+  // Both old real listeners were removed by the bounds world before this hook.
+  let previous=[hierarchy::Previous{id,location:loc.clone(),far:None}];
+  match hierarchy::reconcile(id,&loc,entry,result?,&previous,self.locations,self.far)?{
+   bounds::DistanceAction::Hierarchy{mut edits,keys}=>{if let Some(keys)=keys{edits.insert(0,bounds::DistanceEdit::Register{pair:id,objects,keys});}Ok(edits)},
+   _=>Err("recursive reactivation returned invalid ownership edits"),
+  }
+ }
  fn activated(&mut self,id:usize,objects:[usize;2],budgets:[Budget;2])->Result<Option<[f32;2]>,&'static str>{
-  let loc=*self.locations.get(&id).ok_or("reactivated compact child lost identity")?;
+  let loc=self.locations.get(&id).cloned().ok_or("reactivated compact child lost identity")?;
   if objects!=loc.key.slots||!self.far.contains_key(&id){return Err("reactivated compact far ownership differs");}
   let definitions=objects.map(|s|self.objects[&s]);let cores=definitions.map(|o|o.core);
   let convexes=std::array::from_fn::<_,2,_>(|s|definitions[s].solid.compact_ledge(loc.key.ledges[s]).ok_or("far child lost compact ledge"));let [a,b]=convexes;
-  let entry=self.coarse.get_mut(&loc.broad).ok_or("reactivated child lost parent")?.entries_mut().iter_mut().find(|e|e.key==loc.key).ok_or("reactivated child disappeared")?;
+  let entry=self.coarse.get_mut(&loc.broad).ok_or("reactivated child lost parent")?.entry_at_path_mut(&loc.path)?;
   let mut bodies=cores.map(|c|self.bodies[c]);let result=self.lifecycle.reactivated(id,entry,[a?,b?],budgets,objects.map(|s|self.motion[&s]),&mut bodies,self.cache);
   for i in 0..2{self.bodies[cores[i]]=bodies[i];}
   let replacement=result?;
@@ -274,20 +363,20 @@ impl bounds::Hooks for Dispatch<'_,'_>{
   if !self.coarse.contains_key(&broad){self.coarse.insert(broad,Contacts::new(objects,definitions.map(|o|o.solid))?);}
   let motion=objects.map(|id|self.motion[&id]);let mut edits=vec![];
   let shared=RefCell::new((&mut self.lifecycle,&mut self.bodies,&mut self.cache,&mut self.locations,&mut self.far,&mut edits));
-  self.coarse.get_mut(&broad).unwrap().update(input,|key,entry,convexes|{
+  self.coarse.get_mut(&broad).unwrap().update(input,|_,entry,convexes|{
    let mut shared=shared.borrow_mut();let (lifecycle,bank,cache,locations,far,edits)=&mut *shared;let cores=definitions.map(|o|o.core);let mut bodies=cores.map(|id|bank[id]);
-   let result=lifecycle.created(entry,convexes,budgets,motion,&mut bodies,cache);for i in 0..2{bank[cores[i]]=bodies[i];}let result=result?;let id=result.id;
-   if let Some((keys,delta))=result.far{if far.insert(id,delta).is_some(){return Err("duplicate created far contact");}edits.push(bounds::DistanceEdit::Register{pair:id,objects:key.slots,keys});}
-   if locations.contains_key(&id){return Err("compact lifecycle reused live child identity");}locations.insert(id,Location{broad,key:*key});Ok(())
-  },|key,entry|{
-   let mut shared=shared.borrow_mut();let (lifecycle,_,_,locations,far,edits)=&mut *shared;let id=locations.iter().find_map(|(&id,loc)|(loc.broad==broad&&loc.key==*key).then_some(id)).ok_or("retired compact child lacks identity")?;
-   lifecycle.retired(id,entry)?;locations.remove(&id);if far.remove(&id).is_some(){edits.push(bounds::DistanceEdit::Clear{pair:id});}Ok(())
+   let input=CreationInput{budgets,properties:motion,cached_motion:definitions.map(|o|o.cached_motion),margins:definitions.map(|o|o.margin)};
+   let result=lifecycle.created(entry,convexes,input,&mut bodies,cache);for i in 0..2{bank[cores[i]]=bodies[i];}
+   hierarchy::publish(broad,entry,result?,locations,far,edits)
+  },|_,entry|{
+   let mut shared=shared.borrow_mut();let (lifecycle,_,_,locations,far,edits)=&mut *shared;
+   hierarchy::retire(broad,entry,&mut ***lifecycle,locations,far,edits)
   })?;drop(shared);Ok(edits)
  }
  fn removed(&mut self,broad:usize,_:[usize;2])->Result<Vec<bounds::DistanceEdit>,&'static str>{
   let contacts=self.coarse.get_mut(&broad).ok_or("removed compact parent is missing")?;
   let mut edits=vec![];
-  contacts.clear(|key,entry|{let id=self.locations.iter().find_map(|(&id,loc)|(loc.broad==broad&&loc.key==*key).then_some(id)).ok_or("removed compact child lacks identity")?;self.lifecycle.retired(id,entry)?;self.locations.remove(&id);if self.far.remove(&id).is_some(){edits.push(bounds::DistanceEdit::Clear{pair:id});}Ok(())})?;
+  contacts.clear(|_,entry|hierarchy::retire(broad,entry,self.lifecycle,self.locations,self.far,&mut edits))?;
   self.coarse.remove(&broad);Ok(edits)
  }
 }

@@ -374,6 +374,9 @@ pub struct Surface {
     /// texture's real size instead, which differs when vbsp sized texdata
     /// from a %tooltexture or the texture changed after compile.
     pub texdata_size: [f32; 2],
+    /// Players and NPCs collide with it: false for a displacement Hammer
+    /// marked "no hull collision" (c13m1's creek water surface).
+    pub hull: bool,
 }
 #[derive(Clone)]
 pub struct Prop {
@@ -407,6 +410,13 @@ pub struct LightAtlas {
 }
 fn error(s: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, s)
+}
+/// Hammer's displacement collision flags live in ddispinfo_t.minTess once
+/// its top bit (DISP_INFO_FLAG_MAGIC) is set: 2 no physics, 4 no hull,
+/// 8 no ray collision. False when players pass through it.
+fn displacement_hull(info: &[u8]) -> io::Result<bool> {
+    let tess = word(info, 24)?;
+    Ok(tess & 0x8000_0000 == 0 || tess & 4 == 0)
 }
 fn word(b: &[u8], offset: usize) -> io::Result<u32> {
     Ok(u32::from_le_bytes(
@@ -1002,6 +1012,7 @@ fn overlays(
                 blend: vec![],
                 bump: vec![],
                 texdata_size: OVERLAY_UV,
+                hull: true,
             });
             for (p, uv, luv) in draped {
                 surface.positions.push(convert(p));
@@ -1022,6 +1033,7 @@ fn overlays(
             blend: vec![],
             bump: vec![],
             texdata_size: OVERLAY_UV,
+            hull: true,
         });
         for tri in [[0, 1, 2], [0, 2, 3]] {
             let triangle = oriented_triangle(tri.map(|i| (corners[i], corners[i], tex_uv[i])), n);
@@ -1404,7 +1416,7 @@ pub fn parse(b: &[u8]) -> io::Result<World> {
     let (lightmap, tiles) = bake_atlas_bumped(faces, light, &bumped)?;
     let light_styles = styled_faces(faces, texinfo, light, &tiles);
     let visibility = crate::visibility::Data::parse(b, faces.len() / 56)?;
-    let mut groups: BTreeMap<(usize, String, bool, Vec<u16>), Surface> = BTreeMap::new();
+    let mut groups: BTreeMap<(usize, String, bool, Vec<u16>, bool), Surface> = BTreeMap::new();
     let mut positions = vec![];
     let mut rendered = 0;
     for (model_index, model) in models.chunks_exact(48).enumerate() {
@@ -1445,8 +1457,12 @@ pub fn parse(b: &[u8]) -> io::Result<World> {
             } else {
                 vec![]
             };
+            let hull = match short(face, 12)? as i16 {
+                disp if disp >= 0 => displacement_hull(record(lump(b, 26)?, disp as usize, 176)?)?,
+                _ => true,
+            };
             let group = groups
-                .entry((model_index, material.clone(), is_sky, clusters.clone()))
+                .entry((model_index, material.clone(), is_sky, clusters.clone(), hull))
                 .or_insert_with(|| Surface {
                     clusters,
                     model: model_index,
@@ -1458,6 +1474,7 @@ pub fn parse(b: &[u8]) -> io::Result<World> {
                     blend: vec![],
                     bump: vec![],
                     texdata_size: size,
+                    hull,
                 });
             let mut polygon = vec![];
             for i in 0..len {
@@ -1917,5 +1934,21 @@ mod tests {
             spawn(br#"{ "classname" "info_survivor_position" "origin" "100 200 300" }"#).unwrap();
         assert!((p[1] - 9.27).abs() < 0.0001);
         assert_eq!(p[0], 2.54);
+    }
+    #[test]
+    fn displacement_hull_reads_hammer_collision_flags_from_min_tess() {
+        let mut info = vec![0u8; 176];
+        // Older BSPs: minTess is a tessellation count, never flags.
+        info[24..28].copy_from_slice(&4u32.to_le_bytes());
+        assert!(displacement_hull(&info).unwrap());
+        // c13m1 terrain: magic only.
+        info[24..28].copy_from_slice(&0x8000_0000u32.to_le_bytes());
+        assert!(displacement_hull(&info).unwrap());
+        // c13m1 creek water: no physics | no hull | no ray.
+        info[24..28].copy_from_slice(&0x8000_000eu32.to_le_bytes());
+        assert!(!displacement_hull(&info).unwrap());
+        // No ray collision alone still blocks players.
+        info[24..28].copy_from_slice(&0x8000_0008u32.to_le_bytes());
+        assert!(displacement_hull(&info).unwrap());
     }
 }

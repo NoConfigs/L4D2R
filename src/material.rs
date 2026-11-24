@@ -404,6 +404,11 @@ fn values(
                 // the LDR VTF entirely, so select its authored HDR block rather
                 // than silently retaining an unavailable base texture.
                 map.insert(t[i].to_lowercase(), t[i + 1].clone());
+            } else if shader == "sky" && nesting == 2 && section == "sky_hdr_dx9" {
+                // HDR maps draw skies with Sky_HDR_DX9 (stdshader_dx9), so
+                // its block overrides: c8m1's storm sky sets $color .65 at
+                // the top and .085 for HDR (2.3x too bright before).
+                map.insert(t[i].to_lowercase(), t[i + 1].clone());
             } else if shader == "water" && nesting == 2 && matches!(section.as_str(), ">=dx90" | ">=dx90_20b" | ">=dx90_30") {
                 // These supported DX9 overrides supply e.g. urban river fog.
                 map.insert(t[i].to_lowercase(), t[i + 1].clone());

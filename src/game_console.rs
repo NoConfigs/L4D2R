@@ -565,6 +565,10 @@ fn console(
                         game.paused = false;
                     }
                     if !out.is_empty() {
+                        // Capture runs log the reply (getpos etc.).
+                        if scripted.is_some() {
+                            println!("Capture reply: {out}");
+                        }
                         state.lines.push(out);
                     }
                 }

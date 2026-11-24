@@ -29,6 +29,24 @@ pub(crate) struct Contacts<'a>{objects:[usize;2],solids:[&'a PhySolid;2],entries
 pub(crate) struct Input{pub bodies:[Body;2],pub at:f64,pub margin:f32,pub provided:[Option<usize>;2],pub restricted:[Option<usize>;2]}
 pub(crate) struct Changes{pub lists:[Vec<usize>;2],pub queries:[Option<Query>;2],pub created:Vec<Pair>,pub removed:Vec<Pair>}
 impl<'a> Contacts<'a>{
+ #[cfg(test)]
+ pub(crate) fn hierarchy_snapshot(&self)->serde_json::Value{
+  serde_json::json!({"listeners":self.listeners.iter().map(|c|c.load(Ordering::Relaxed)).collect::<Vec<_>>(),"entries":self.entries.iter().map(|e|serde_json::json!({"slots":e.key.slots,"ledges":e.key.ledges,"contact":format!("{:?}",e.contact),"recursive":e.recursive.as_ref().map(|r|serde_json::json!({"split":r.split,"count":r.count.load(Ordering::Relaxed),"descendants":r.descendants.hierarchy_snapshot()}))})).collect::<Vec<_>>()})
+ }
+ /// A ledge pair is unique only inside its immediate descendant vector.
+ /// Keep the complete ancestry when binding a world mindist identity.
+ pub(crate) fn entry_at_path(&self,path:&[Pair])->Result<&Entry<'a>,&'static str>{
+  let (key,rest)=path.split_first().ok_or("empty compact contact path")?;
+  let entry=self.entries.iter().find(|e|e.key==*key).ok_or("compact contact path is missing")?;
+  if rest.is_empty(){return Ok(entry);}
+  entry.recursive.as_ref().ok_or("compact contact path crosses a leaf")?.descendants.entry_at_path(rest)
+ }
+ pub(crate) fn entry_at_path_mut(&mut self,path:&[Pair])->Result<&mut Entry<'a>,&'static str>{
+  let (key,rest)=path.split_first().ok_or("empty compact contact path")?;
+  let entry=self.entries.iter_mut().find(|e|e.key==*key).ok_or("compact contact path is missing")?;
+  if rest.is_empty(){return Ok(entry);}
+  entry.recursive.as_mut().ok_or("compact contact path crosses a leaf")?.descendants.entry_at_path_mut(rest)
+ }
  pub(crate) fn snapshot_with_counters(&self,counters:&mut CounterSnapshot)->Self{
   Self{objects:self.objects,solids:self.solids,entries:self.entries.iter().map(|e|e.snapshot_with_counters(counters)).collect(),listeners:self.listeners.iter().map(|c|counters.counter(c)).collect()}
  }
@@ -363,6 +381,15 @@ mod pending_psi_tests;
 #[cfg(test)]
 mod snapshot_tests{
  use super::*;
+ #[test]
+ fn full_paths_distinguish_equal_leaf_pairs_under_different_parents(){
+  let solid=PhySolid::default();let mut forest=Contacts::new([0,1],[&solid,&solid]).unwrap();let leaf=Pair{slots:[0,1],ledges:[1,2]};
+  let parents=[Pair{slots:[0,1],ledges:[10,11]},Pair{slots:[0,1],ledges:[20,21]}];
+  for (i,key) in parents.into_iter().enumerate(){let mut descendants=Contacts::new([0,1],[&solid,&solid]).unwrap();let mut contact=Contact::new([0,1],crate::ivp_mindist_graph::COMPACT_PAIR_FLAGS,0.).unwrap();contact.query.frame=i as u32+1;descendants.entries.push(Entry{key:leaf,contact,recursive:None});forest.entries.push(Entry{key,contact:Contact::new([0,1],crate::ivp_mindist_graph::COMPACT_PAIR_FLAGS,0.).unwrap(),recursive:Some(Box::new(Recursive{split:Some(0),count:Arc::new(AtomicI32::new(1)),descendants}))});}
+  assert_eq!(forest.entry_at_path(&[parents[0],leaf]).unwrap().contact.query.frame,1);assert_eq!(forest.entry_at_path(&[parents[1],leaf]).unwrap().contact.query.frame,2);
+  forest.entry_at_path_mut(&[parents[0],leaf]).unwrap().contact.query.frame=9;assert_eq!(forest.entry_at_path(&[parents[0],leaf]).unwrap().contact.query.frame,9);assert_eq!(forest.entry_at_path(&[parents[1],leaf]).unwrap().contact.query.frame,2);
+  assert!(forest.entry_at_path(&[]).is_err());assert!(forest.entry_at_path(&[leaf]).is_err());assert!(forest.entry_at_path(&[parents[0],leaf,leaf]).is_err());
+ }
  #[test]
  fn recursive_forest_snapshots_preserve_aliases_without_sharing_mutable_values(){
   let solid=PhySolid::default();let root=Arc::new(AtomicI32::new(7));
