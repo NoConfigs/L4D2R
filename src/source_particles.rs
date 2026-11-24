@@ -1736,7 +1736,11 @@ pub fn update(
         if TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 60 == 0 {
             for batch in &effects.batches {
                 let Some(owner) = logic.world.ents.get(batch.owner) else { continue };
-                if !(prefix == "*" || owner.me.targetname.starts_with(&prefix)) || batch.particles.is_empty() { continue; }
+                if !(prefix == "*" || owner.me.targetname.starts_with(&prefix)) { continue; }
+                if batch.particles.is_empty() {
+                    println!("L4D2RPFX t={:.1} {} empty batch {} controls={}", logic.world.time, owner.me.targetname, batch.definition.material, batch.controls.len());
+                    continue;
+                }
                 let n = batch.particles.len() as f32;
                 let floor = batch.particles.iter().map(|p| p.position.y).fold(f32::MAX, f32::min);
                 let top = batch.particles.iter().map(|p| p.position.y + p.radius).fold(f32::MIN, f32::max);

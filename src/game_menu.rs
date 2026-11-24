@@ -41,6 +41,8 @@ pub enum Page {
     Friends,
     /// Pre-game lobby (retail gamelobby.res; game_lobby.rs).
     Lobby,
+    /// GLOWS: glow colour editor and presets (glow_menu.rs).
+    Glow,
     /// JOIN A GAME: LAN and Steam games (retail foundgames.res;
     /// game_browser.rs).
     Browser,
@@ -67,6 +69,8 @@ impl PageNode {
 pub(crate) struct Action(ButtonAction);
 #[derive(Clone, Copy)]
 pub(crate) enum ButtonAction {
+    /// Pause menu: open EDIT WORLD (crate::world_editor).
+    EditWorld,
     GameFiles,
     Mode(usize),
     Next,
@@ -106,6 +110,8 @@ pub(crate) enum ButtonAction {
     ToggleMod(usize),
     /// Opens the TOUCH & HUD page.
     TouchHud,
+    /// OPTIONS > Glows (glow_menu.rs).
+    Glows,
     /// PLAY CAMPAIGN settings -> lobby (retail CREATE LOBBY).
     CreateLobby,
     /// Lobby EDIT GAME SETTINGS: back to the settings page.
@@ -300,6 +306,7 @@ fn label_size(action: ButtonAction) -> f32 {
         ButtonAction::Video
             | ButtonAction::Audio
             | ButtonAction::TouchHud
+            | ButtonAction::Glows
             | ButtonAction::ToggleMod(_)
             | ButtonAction::Difficulty
             | ButtonAction::NewCampaign
@@ -568,7 +575,7 @@ pub fn hybrid_paint(
     // the mouse moves onto another entry.
     let flyout_hover = buttons.iter().any(|(i, a, _)| {
         matches!(i, Interaction::Hovered | Interaction::Pressed)
-            && matches!(a.0, ButtonAction::Audio | ButtonAction::Video | ButtonAction::TouchHud)
+            && matches!(a.0, ButtonAction::Audio | ButtonAction::Video | ButtonAction::TouchHud | ButtonAction::Glows)
     });
     for (interaction, action, children) in &buttons {
         let open = matches!(action.0, ButtonAction::Options) && frontend.page == Page::Options
@@ -1060,12 +1067,13 @@ pub fn setup(
                 // (no Steam Input, Multiplayer or Steam Cloud), in rows tall
                 // enough to tap.
                 const ROW: f32 = 34.;
-                let flyout = flyout_panel(&mut commands, panel, rect(420., 412.5, 234., 3. * ROW + 12.), owner);
+                let flyout = flyout_panel(&mut commands, panel, rect(420., 412.5, 234., 4. * ROW + 12.), owner);
                 commands.entity(flyout).insert(OptionsFlyout);
                 for (i, (label, action)) in [
                     ("Video", ButtonAction::Video),
                     ("Audio", ButtonAction::Audio),
                     ("Touch & HUD", ButtonAction::TouchHud),
+                    ("Glows", ButtonAction::Glows),
                 ]
                 .into_iter()
                 .enumerate()
@@ -1077,7 +1085,7 @@ pub fn setup(
                 }
                 continue;
             }
-            let flyout = flyout_panel(&mut commands, panel, rect(420., 412.5, 234., 130.), owner);
+            let flyout = flyout_panel(&mut commands, panel, rect(420., 412.5, 234., 130. + FLYOUT_ROW), owner);
             commands.entity(flyout).insert(OptionsFlyout);
             hybrid_button(
                 &mut commands,
@@ -1107,8 +1115,17 @@ pub fn setup(
                 ButtonAction::TouchHud,
                 Hybrid::Flyout,
             );
+            hybrid_button(
+                &mut commands,
+                flyout,
+                "Glows",
+                &font,
+                rect(12., FLYOUT_TEXT + 4. * FLYOUT_ROW, 210., FLYOUT_ROW),
+                ButtonAction::Glows,
+                Hybrid::Flyout,
+            );
             // Not built yet: drawn like retail's idle entries.
-            for (label, row) in [("Multiplayer", 4.), ("Steam Cloud", 5.)] {
+            for (label, row) in [("Multiplayer", 5.), ("Steam Cloud", 6.)] {
                 commands.spawn((
                     Text::new(label),
                     TextFont {
@@ -1150,6 +1167,20 @@ pub fn setup(
                     Hybrid::Main,
                 );
             }
+            // EDIT WORLD: bottom right of the black band, on the EXIT TO
+            // MAIN MENU line, its text ending 150 from the right edge as the
+            // left column starts 150 from the left. Shown only in a solo
+            // campaign (crate::world_editor::solo).
+            let edit = hybrid_button(
+                &mut commands,
+                panel,
+                "EDIT WORLD",
+                &font,
+                rect(990., 479., 140., 35.),
+                ButtonAction::EditWorld,
+                Hybrid::Main,
+            );
+            commands.entity(edit).insert(crate::world_editor::EditWorldButton);
             for (label, y) in [
                 ("TAKE A BREAK", 238.),
                 ("INVITE FRIENDS", 312.),
@@ -1767,6 +1798,7 @@ pub fn update(
             ButtonAction::Audio => frontend.page = Page::Audio,
             ButtonAction::Video => frontend.page = Page::Video,
             ButtonAction::TouchHud => frontend.page = Page::Touch,
+            ButtonAction::Glows => frontend.page = Page::Glow,
             ButtonAction::Extras => frontend.page = Page::Extras,
             ButtonAction::Friends => frontend.page = Page::Friends,
             ButtonAction::Addons => frontend.page = Page::Addons,
@@ -1796,6 +1828,11 @@ pub fn update(
             ButtonAction::Resume => {
                 frontend.page = Page::Game;
                 s.paused = true;
+            }
+            ButtonAction::EditWorld => {
+                frontend.page = Page::Game;
+                s.paused = true;
+                crate::world_editor::request_open();
             }
             ButtonAction::CreateLobby => {
                 if let Some(l) = game_lobby.as_mut() {

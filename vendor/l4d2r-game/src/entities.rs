@@ -11,6 +11,21 @@ use l4d2_formats::vmf::Connection;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
+/// Source's `developer` level, set by the gameplay console.
+pub static DEVELOPER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// DevMsg lines for the gameplay console, drained by the rewrite each frame.
+pub static DEV_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// Source DevMsg(level, ...): kept only when `developer` is at least `level`.
+pub fn dev_msg(level: u32, line: String) {
+    if DEVELOPER.load(std::sync::atomic::Ordering::Relaxed) >= level {
+        if let Ok(mut log) = DEV_LOG.lock() {
+            if log.len() < 4096 {
+                log.push(line);
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Durability {
     pub health: f32,
@@ -702,6 +717,97 @@ impl EntityWorld {
         index
     }
 
+    /// `ent_create` / `prop_dynamic_create`: a new entity of `classname`
+    /// with keyvalues, given the same behaviour (Kind) a map entity of that
+    /// class gets at load.
+    pub fn create_entity(&mut self, classname: &str, keyvalues: &[(String, String)], origin: Vec3, angles: Vec3, model: Option<String>) -> usize {
+        let mut kv = vec![("classname".to_string(), classname.to_string())];
+        kv.extend(keyvalues.iter().cloned());
+        let targetname = keyvalues.iter().find(|(k, _)| k.eq_ignore_ascii_case("targetname")).map(|(_, v)| v.clone()).unwrap_or_default();
+        let me = MapEnt {
+            index: 0,
+            classname: classname.to_ascii_lowercase(),
+            targetname,
+            origin,
+            angles,
+            mdl: model,
+            brush: None,
+            ent: l4d2_formats::bsp::Entity(kv),
+        };
+        let kind = initial_kind(&me, &self.bsp);
+        self.add_runtime_entity(Ent { me, conns: vec![], kind, alive: true, templated: false, parent: None })
+    }
+
+    /// Source's keyvalue path (`ent_keyvalue`, AddOutput "key value"):
+    /// targetname keeps the name index, classname/origin/angles/model change
+    /// the entity, `On...` keys add a connection ("target,input,param,delay,
+    /// times", ':' also accepted), anything else is stored as a keyvalue.
+    pub fn set_keyvalue(&mut self, ent: usize, key: &str, value: &str) {
+        let Some(e) = self.ents.get_mut(ent) else { return };
+        let lower = key.to_ascii_lowercase();
+        let vec3 = |v: &str| {
+            let n: Vec<f32> = v.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+            (n.len() == 3).then(|| Vec3::new(n[0], n[1], n[2]))
+        };
+        match lower.as_str() {
+            "targetname" => {
+                let old = e.me.targetname.to_ascii_lowercase();
+                if let Some(ids) = self.names.get_mut(&old) {
+                    ids.retain(|&id| id != ent);
+                }
+                self.ents[ent].me.targetname = value.to_string();
+                self.names.entry(value.to_ascii_lowercase()).or_default().push(ent);
+            }
+            // Only the targeting name changes (stored as the keyvalue
+            // below); behaviour keeps the real class, as in Source.
+            "classname" => {}
+            "origin" => {
+                if let Some(v) = vec3(value) {
+                    e.me.origin = v;
+                    if let Some(m) = self.parent_bind.get_mut(ent) {
+                        *m = crate::mapents::entity_matrix(v, self.ents[ent].me.angles);
+                    }
+                }
+            }
+            "angles" => {
+                if let Some(v) = vec3(value) {
+                    e.me.angles = v;
+                    if let Some(m) = self.parent_bind.get_mut(ent) {
+                        *m = crate::mapents::entity_matrix(self.ents[ent].me.origin, v);
+                    }
+                }
+            }
+            "model" => e.me.mdl = Some(value.to_string()),
+            k if k.starts_with("on") && value.contains([',', ':']) => {
+                let parts: Vec<&str> = value.split([',', ':']).collect();
+                e.conns.push(Connection {
+                    output: key.into(),
+                    target: parts[0].trim().into(),
+                    input: parts.get(1).map_or("", |s| s.trim()).into(),
+                    param: parts.get(2).copied().unwrap_or("").into(),
+                    delay: parts.get(3).and_then(|v| v.trim().parse().ok()).unwrap_or(0.0),
+                    times: parts.get(4).and_then(|v| v.trim().parse().ok()).unwrap_or(-1),
+                });
+                return;
+            }
+            _ => {}
+        }
+        let e = &mut self.ents[ent];
+        e.me.ent.0.retain(|(k, _)| !k.eq_ignore_ascii_case(key));
+        e.me.ent.0.push((key.to_string(), value.to_string()));
+        if matches!(e.me.classname.as_str(), "fog_volume" | "env_fog_controller") {
+            crate::fog::set_key(&mut self.ents[ent], key, value.to_string());
+            self.fog.changed(ent, &self.ents[ent]);
+        }
+    }
+
+    /// Entities whose HammerId keyvalue is `id` (`ent_keyvalue 9768024 ...`).
+    pub fn find_hammer_id(&self, id: &str) -> Vec<usize> {
+        self.ents.iter().enumerate()
+            .filter(|(_, e)| e.alive && e.me.kv("hammerid").is_some_and(|h| h.trim() == id.trim()))
+            .map(|(i, _)| i).collect()
+    }
+
     /// Queue every connection of `ent` named `output`.
     pub fn fire_output(&mut self, ent: usize, output: &str, activator: Option<usize>) {
         self.fire_output_value(ent, output, None, activator);
@@ -747,6 +853,11 @@ impl EntityWorld {
             });
         }
         for (target, input, param, delay) in to_fire {
+            // CBaseEntityOutput::FireOutput's developer 2 trace.
+            if DEVELOPER.load(std::sync::atomic::Ordering::Relaxed) >= 2 && !target.starts_with("!script_entity:") {
+                let caller = &self.ents[ent].me;
+                dev_msg(2, format!("({:.2}) output: ({},{}) -> ({},{},{:.1})({})", self.time, caller.classname, caller.targetname, target, input, delay, param));
+            }
             self.seq += 1;
             self.queue.push(Pending {
                 time: self.time + delay,
@@ -860,13 +971,20 @@ impl EntityWorld {
                         .ents
                         .iter()
                         .enumerate()
-                        .filter(|(_, e)| e.alive && e.me.classname.eq_ignore_ascii_case(t))
+                        .filter(|(_, e)| e.alive && Self::target_class(e).eq_ignore_ascii_case(t))
                         .map(|(i, _)| i)
                         .collect();
                 }
                 v
             }
         }
+    }
+
+    /// The class name I/O targets match: a `ClassName` keyvalue renames it
+    /// (retail testscripts rename relays to "Butt") while the entity keeps
+    /// behaving as its real class.
+    pub fn target_class(e: &Ent) -> &str {
+        e.me.kv("classname").unwrap_or(&e.me.classname)
     }
 
     /// Advance time, deliver due inputs, run entity think logic.
@@ -930,7 +1048,22 @@ impl EntityWorld {
             }
             let previous_actor = self.io_actor;
             self.io_actor = p.actor;
-            for t in self.resolve(&p.target, p.activator, p.caller) {
+            let targets = self.resolve(&p.target, p.activator, p.caller);
+            // CEventQueue::ServiceEvents' developer 2 traces.
+            if DEVELOPER.load(std::sync::atomic::Ordering::Relaxed) >= 2 && !p.input.starts_with("__") && !p.target.starts_with("!script_entity:") {
+                let caller = p.caller.and_then(|c| self.ents.get(c)).map(|c| &c.me);
+                if targets.is_empty() {
+                    dev_msg(2, format!(
+                        "unhandled input: ({}) -> ({}), from ({},{}); target entity not found",
+                        p.input, p.target, caller.map_or("", |c| c.classname.as_str()), caller.map_or("", |c| c.targetname.as_str())
+                    ));
+                }
+                for &t in &targets {
+                    let name = if self.ents[t].me.targetname.is_empty() { &self.ents[t].me.classname } else { &self.ents[t].me.targetname };
+                    dev_msg(2, format!("({:.2}) input {}: {}.{}({})", self.time, caller.map_or("", |c| c.targetname.as_str()), name, p.input, p.param));
+                }
+            }
+            for t in targets {
                 if self.ents[t].alive {
                     self.input(t, &p.input, &p.param, p.activator, p.caller);
                 }
@@ -1324,6 +1457,10 @@ impl EntityWorld {
     }
 
     pub fn damage_entity(&mut self, ent: usize, dmg: f32, kind: DamageKind) -> bool {
+        if std::env::var_os("L4D2R_BREAK_LOG").is_some() {
+            let me = &self.ents[ent].me;
+            println!("L4D2RDAMAGE t={:.2} ent={ent} {} {:?} dmg={dmg} kind={kind:?}", self.time, me.classname, me.mdl);
+        }
         if !self.ents.get(ent).is_some_and(|e| e.alive) || !dmg.is_finite() || dmg <= 0. {
             return false;
         }
@@ -1377,6 +1514,11 @@ impl EntityWorld {
     pub fn break_ent(&mut self, ent: usize) {
         if !self.ents[ent].alive {
             return;
+        }
+        // L4D2R_BREAK_LOG: debug, every entity break.
+        if std::env::var_os("L4D2R_BREAK_LOG").is_some() {
+            let me = &self.ents[ent].me;
+            println!("L4D2RBREAK t={:.2} ent={ent} {} {:?} at {:?}", self.time, me.classname, me.mdl, me.origin);
         }
         self.fire_output(ent, "OnBreak", None);
         self.events.push(EntEvent::Broken { ent });
@@ -1615,15 +1757,10 @@ impl EntityWorld {
                             times: parts.get(4).and_then(|v| v.parse().ok()).unwrap_or(-1),
                         };
                         self.ents[ent].conns.push(conn);
-                    } else if matches!(self.ents[ent].me.classname.as_str(), "fog_volume" | "env_fog_controller") {
-                        if out.eq_ignore_ascii_case("targetname") {
-                            let old = self.ents[ent].me.targetname.to_ascii_lowercase();
-                            if let Some(ids) = self.names.get_mut(&old) {ids.retain(|&id| id != ent);}
-                            self.ents[ent].me.targetname = rest.to_string();
-                            self.names.entry(rest.to_ascii_lowercase()).or_default().push(ent);
-                        }
-                        crate::fog::set_key(&mut self.ents[ent],out,rest.to_string());
-                        self.fog.changed(ent,&self.ents[ent]);
+                    } else {
+                        // AddOutput "key value" on any entity (testscripts:
+                        // "HammerId 9768024", "classname df_existing").
+                        self.set_keyvalue(ent, out, rest);
                     }
                 }
                 return;

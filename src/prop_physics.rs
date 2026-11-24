@@ -38,6 +38,10 @@ pub struct Body {
     /// Exact entity matrix we last published. Own Euler/Source round trips
     /// must not masquerade as authored motion and invalidate physical state.
     debris_pose: Option<l4d2r_math::Mat4>,
+    /// Debris no-progress watch: (anchor position, seconds within 2 cm of
+    /// it; 0.1 m ~ 4 units since c4m3 shards jitter ~3 units), asleep because of it). c4m3's pre-broken window shards jittered
+    /// on their thin faces forever, ~30 ms of physics a frame.
+    progress: (Vec3, f32, bool),
 }
 impl Body {
     pub(crate) fn launch_debris(&mut self, velocity: Vec3, angular: Vec3, disabled: bool) {
@@ -703,6 +707,7 @@ mod tests {
                         supported_sleep: false,
                         resting_on: None,
                         support_clock: 0.,
+                        progress: (Vec3::ZERO, 0., false),
                         surface: default(),
                         on_floor: false,
                         inverse_inertia: crate::rigid_contact::inverse_box_inertia(
@@ -819,6 +824,7 @@ mod tests {
                     supported_sleep: false,
                     resting_on: None,
                     support_clock: 0.,
+                    progress: (Vec3::ZERO, 0., false),
                     surface: default(),
                     on_floor: false,
                     inverse_inertia: crate::rigid_contact::inverse_box_inertia(
@@ -1089,6 +1095,7 @@ impl Props {
                     supported_sleep: false,
                     resting_on: None,
                     support_clock: 0.,
+                    progress: (Vec3::ZERO, 0., false),
                     surface,
                     on_floor: false,
                     inverse_inertia,
@@ -1247,8 +1254,12 @@ impl Props {
                     b.position=matrix.transform_point(b.center);b.rotation=matrix.rotation;
                     b.pose_cache=None;
                     body.asleep=false;body.supported_sleep=false;body.support_clock=0.;
+                    body.progress=(b.position,0.,false);
                 }
                 if body.asleep {
+                    // Stalled debris stays asleep until something moves it
+                    // (an authored pose change wakes it above).
+                    if body.progress.2 { continue; }
                     body.support_clock += dt;
                     if body.support_clock < 0.1 { continue; }
                     body.support_clock = 0.;
@@ -1257,7 +1268,13 @@ impl Props {
                 }
                 let b = &mut rigid.bodies[0];
                 b.velocity = body.velocity; b.angular = body.angular;
+                let started = std::time::Instant::now();
                 let (supported, speed) = rigid.step(dt, &debris_collision);
+                // L4D2R_SLOW_PROPS: debug, debris props whose step takes > 5 ms.
+                if std::env::var_os("L4D2R_SLOW_PROPS").is_some() && started.elapsed().as_secs_f32() > 0.0005 {
+                    let e = &world.ents[id];
+                    println!("L4D2R slow prop {id} {} {:?} at {:?}: {:.1} ms, {} vertices", e.me.classname, e.me.mdl, e.me.origin, started.elapsed().as_secs_f32() * 1000., rigid.bodies[0].vertices.len());
+                }
                 let b = &mut rigid.bodies[0];
                 body.velocity = b.velocity; body.angular = b.angular; body.rotation = b.rotation;
                 body.on_floor = supported;
@@ -1265,6 +1282,17 @@ impl Props {
                 if body.support_clock >= 0.5 {
                     body.asleep = true; body.supported_sleep = true;
                     body.velocity = Vec3::ZERO; body.angular = Vec3::ZERO;
+                }
+                // No progress for a second: sleep even without a clean
+                // support certificate.
+                if b.position.distance(body.progress.0) > 0.1 {
+                    body.progress = (b.position, 0., false);
+                } else {
+                    body.progress.1 += dt;
+                    if body.progress.1 >= 1. && !body.asleep {
+                        body.asleep = true; body.progress.2 = true;
+                        body.velocity = Vec3::ZERO; body.angular = Vec3::ZERO;
+                    }
                 }
                 let origin = b.position - b.rotation * b.center;
                 let (yaw, negative_pitch, roll) = b.rotation.to_euler(EulerRot::YZX);

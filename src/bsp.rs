@@ -1035,6 +1035,21 @@ fn overlays(
             texdata_size: OVERLAY_UV,
             hull: true,
         });
+        // Source clips an overlay into one fragment per target face, each
+        // lit through that face's own lightmap. Interpolating one quad's
+        // lightmap uv across several faces' atlas tiles drew stray luxel
+        // stripes (c1m1's ballroom burnt001 floor scorches came out as
+        // white streaks; retail draws them dark).
+        let fragments = overlay_fragments(b, faces, texinfo, &targets, tiles, atlas, &corners, &tex_uv, origin, u, v, n);
+        if let Some(fragments) = fragments.filter(|f| !f.is_empty()) {
+            for (p, uv, luv) in fragments {
+                surface.positions.push(convert(p));
+                surface.uv.push(uv);
+                surface.light_uv.push(luv);
+                surface.blend.push(0.);
+            }
+            continue;
+        }
         for tri in [[0, 1, 2], [0, 2, 3]] {
             let triangle = oriented_triangle(tri.map(|i| (corners[i], corners[i], tex_uv[i])), n);
             for (p, _, uv) in triangle {
@@ -1046,6 +1061,120 @@ fn overlays(
         }
     }
     Ok(out.into_values().collect())
+}
+
+/// An overlay's two quad triangles clipped to each flat target face, in the
+/// overlay plane (2D coordinates along `u` and `v`): (position, texture uv,
+/// lightmap uv) per vertex, three per triangle. None when a target can't be
+/// read, so the caller falls back to the unclipped quad.
+#[allow(clippy::too_many_arguments)]
+fn overlay_fragments(
+    b: &[u8],
+    faces: &[u8],
+    texinfo: &[u8],
+    targets: &[usize],
+    tiles: &HashMap<usize, [usize; 4]>,
+    atlas: [f32; 2],
+    corners: &[[f32; 3]],
+    tex_uv: &[[f32; 2]; 4],
+    origin: [f32; 3],
+    u: [f32; 3],
+    v: [f32; 3],
+    n: [f32; 3],
+) -> Option<Vec<([f32; 3], [f32; 2], [f32; 2])>> {
+    let (vertices, edges, surfedges) = (lump(b, 3).ok()?, lump(b, 12).ok()?, lump(b, 13).ok()?);
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let to2 = |p: [f32; 3]| {
+        let d = [p[0] - origin[0], p[1] - origin[1], p[2] - origin[2]];
+        [dot(d, u), dot(d, v)]
+    };
+    let to3 = |q: [f32; 2]| -> [f32; 3] { std::array::from_fn(|i| origin[i] + q[0] * u[i] + q[1] * v[i] + n[i] * OVERLAY_LIFT) };
+    let cross2 = |o: [f32; 2], a: [f32; 2], b: [f32; 2]| (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    let mut out = vec![];
+    for &id in targets {
+        let face = record(faces, id, 56).ok()?;
+        let &[x, y, _, _] = tiles.get(&id)?;
+        let start = word(face, 4).ok()? as usize;
+        let len = short(face, 8).ok()? as usize;
+        let mut poly: Vec<[f32; 2]> = vec![];
+        for i in 0..len {
+            let signed = word(record(surfedges, start + i, 4).ok()?, 0).ok()? as i32;
+            let edge = record(edges, signed.unsigned_abs() as usize, 4).ok()?;
+            let vertex = short(edge, if signed < 0 { 2 } else { 0 }).ok()? as usize;
+            poly.push(to2(binary::vec3(record(vertices, vertex, 12).ok()?, 0).ok()?));
+        }
+        if poly.len() < 3 {
+            continue;
+        }
+        let area: f32 = (0..poly.len()).map(|i| { let (a, b) = (poly[i], poly[(i + 1) % poly.len()]); a[0] * b[1] - b[0] * a[1] }).sum();
+        if area < 0. {
+            poly.reverse();
+        }
+        let info = record(texinfo, short(face, 10).ok()? as usize, 72).ok()?;
+        let (mins, size) = (
+            [word(face, 28).ok()? as i32 as f32, word(face, 32).ok()? as i32 as f32],
+            [word(face, 36).ok()? as i32 as f32, word(face, 40).ok()? as i32 as f32],
+        );
+        let light = |p: [f32; 3]| -> Option<[f32; 2]> {
+            let l = project(info, 32, p).ok()?;
+            let st = [(l[0] - mins[0]).clamp(0., size[0]), (l[1] - mins[1]).clamp(0., size[1])];
+            Some([(st[0] + x as f32 + 0.5) / atlas[0], (st[1] + y as f32 + 0.5) / atlas[1]])
+        };
+        for tri in [[0, 1, 2], [0, 2, 3]] {
+            let mut t: [[f32; 2]; 3] = tri.map(|i| to2(corners[i]));
+            let mut uvs = tri.map(|i| tex_uv[i]);
+            if cross2(t[0], t[1], t[2]) < 0. {
+                t.swap(1, 2);
+                uvs.swap(1, 2);
+            }
+            let det = cross2(t[0], t[1], t[2]);
+            if det.abs() < 1e-6 {
+                continue;
+            }
+            // Sutherland-Hodgman: the triangle clipped by each face edge.
+            let mut clip: Vec<[f32; 2]> = t.to_vec();
+            for i in 0..poly.len() {
+                let (a, bb) = (poly[i], poly[(i + 1) % poly.len()]);
+                let inside = |p: [f32; 2]| cross2(a, bb, p) >= -1e-4;
+                let input = std::mem::take(&mut clip);
+                for j in 0..input.len() {
+                    let (p, q) = (input[j], input[(j + 1) % input.len()]);
+                    let (pi, qi) = (inside(p), inside(q));
+                    if pi {
+                        clip.push(p);
+                    }
+                    if pi != qi {
+                        let (dp, dq) = (cross2(a, bb, p), cross2(a, bb, q));
+                        let k = dp / (dp - dq);
+                        clip.push([p[0] + (q[0] - p[0]) * k, p[1] + (q[1] - p[1]) * k]);
+                    }
+                }
+                if clip.len() < 3 {
+                    break;
+                }
+            }
+            if clip.len() < 3 {
+                continue;
+            }
+            let tex = |q: [f32; 2]| {
+                let w1 = cross2(t[0], q, t[2]) / det;
+                let w2 = cross2(t[0], t[1], q) / det;
+                let w0 = 1. - w1 - w2;
+                [0, 1].map(|k| uvs[0][k] * w0 + uvs[1][k] * w1 + uvs[2][k] * w2)
+            };
+            for k in 1..clip.len() - 1 {
+                let mut fan = [clip[0], clip[k], clip[k + 1]];
+                if cross2(fan[0], fan[1], fan[2]) < 0. {
+                    fan.swap(1, 2);
+                }
+                let tri3 = oriented_triangle(fan.map(|q| (to3(q), to3(q), tex(q))), n);
+                for (p, _, uv) in tri3 {
+                    out.push((p, uv, light(p)?));
+                }
+            }
+        }
+    }
+    Some(out)
 }
 /// The triangles of an overlay draped over its target displacements:
 /// (position, texture uv, lightmap uv) per vertex, three per triangle, or

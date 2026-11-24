@@ -662,6 +662,10 @@ impl Articulation {
     }
     pub(crate) fn step_acceleration(&mut self, dt: f32, collision: &Collision, reuse_overlap: bool, acceleration: Vec3) -> (bool, f32) {
         let _timing = crate::performance::scope("ragdoll::step");
+        // Fresh embedded-vertex recovery searches allowed this step. A corpse
+        // spawned inside c4m3's saferoom geometry ran hundreds a frame for
+        // ~100 frames (~200 ms each); the rest wait for later steps.
+        let mut recovery_budget = 64u32;
         let mut core_angular=vec![None;self.bodies.len()];
         if dt > 0. {
             for (index,b) in self.bodies.iter_mut().enumerate() {
@@ -1013,10 +1017,13 @@ impl Articulation {
                         let cached = recoveries[index][vertex];
                         let free = if reuse_overlap && cached.is_some_and(|(p, _)| p == point) {
                             cached.unwrap().1
-                        } else {
+                        } else if recovery_budget > 0 {
+                            recovery_budget -= 1;
                             let free = collision.recover_corpse_position(point, half, 0.35);
                             recoveries[index][vertex] = Some((point, free));
                             free
+                        } else {
+                            None
                         };
                         free.map(|free| free - point)
                     } else if hit.fraction < 1. {

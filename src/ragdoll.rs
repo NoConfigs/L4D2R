@@ -498,7 +498,13 @@ impl Body {
     }
     fn step(&mut self, h: f32, collision: &Collision) {
         if let Some(rigid) = &mut self.rigid {
+            let started = std::time::Instant::now();
             let (supported, _speed) = rigid.step(h, collision);
+            // L4D2R_SLOW_PROPS: debug, ragdoll steps over 5 ms.
+            if std::env::var_os("L4D2R_SLOW_PROPS").is_some() && started.elapsed().as_secs_f32() > 0.0005 {
+                let p = rigid.bodies.first().map(|b| b.position / crate::collision::UNIT).unwrap_or_default();
+                println!("L4D2R slow ragdoll at ({:.0} {:.0} {:.0}): {:.1} ms, {} bodies, sleeping={}", p.x, -p.z, p.y, started.elapsed().as_secs_f32() * 1000., rigid.bodies.len(), self.sleeping);
+            }
             for (p, b) in self.points.iter_mut().zip(&rigid.bodies) {
                 p.position = b.position - b.rotation * b.center;
                 p.velocity = b.velocity;

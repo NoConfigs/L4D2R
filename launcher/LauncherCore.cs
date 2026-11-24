@@ -298,6 +298,13 @@ namespace L4D2R.Launcher
             }
             catch (InvalidOperationException) { }
         }
+        /// Source-style launch options (-dev, -console, +developer 2, +map ...),
+        /// appended to the game's command line like Steam's launch options.
+        internal string LaunchOptions
+        {
+            get { return Files.Read(Path.Combine(Root, "runtime/launch-options.txt")).Replace("\r", " ").Replace("\n", " ").Trim(); }
+            set { Files.Write(Path.Combine(Root, "runtime/launch-options.txt"), (value ?? "").Replace("\r", " ").Replace("\n", " ").Trim()); }
+        }
         internal Process StartGame(string game, bool lab, string testArgument = null)
         {
             if (!Built) throw new InvalidOperationException("Build the rewrite first.");
@@ -305,6 +312,8 @@ namespace L4D2R.Launcher
             SaveGame(game);
             Directory.CreateDirectory(Path.Combine(Root, "local-research/parity"));
             string arguments = (testArgument == null ? "" : testArgument + " ") + (lab ? "--test-map " : "") + "--game-dir " + Quote(Installation.Resolve(game));
+            string options = testArgument == null ? LaunchOptions : "";
+            if (options.Length > 0) arguments += " " + options;
             return Process.Start(new ProcessStartInfo(Binary, arguments) { WorkingDirectory = Root, UseShellExecute = false, CreateNoWindow = true });
         }
     }

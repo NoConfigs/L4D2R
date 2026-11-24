@@ -1356,6 +1356,8 @@ pub fn run(root: &Path, path: &Path, capture: Option<String>, verify: bool) -> i
                 game_menu::Page::Advanced
             } else if std::env::args().any(|a| a == "--capture-pause") {
                 game_menu::Page::Pause
+            } else if std::env::args().any(|a| a == "--capture-glows") {
+                game_menu::Page::Glow
             } else if std::env::args().any(|a| a == "--capture-options") {
                 game_menu::Page::Options
             } else if std::env::args().any(|a| a == "--capture-touch-hud") {
@@ -1596,6 +1598,10 @@ pub fn run(root: &Path, path: &Path, capture: Option<String>, verify: bool) -> i
     crate::render_warmup::install(&mut app);
     crate::map_transition::install(&mut app);
     crate::game_console::install(&mut app);
+    crate::dev_console::install(&mut app);
+    crate::runtime_props::install(&mut app);
+    crate::world_editor::install(&mut app);
+    crate::glow_menu::install(&mut app);
     crate::game_chat::install(&mut app);
     crate::multiplayer::install(&mut app);
     crate::net_play::install(&mut app);

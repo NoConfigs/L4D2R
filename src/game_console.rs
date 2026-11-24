@@ -24,6 +24,16 @@ pub struct Console {
     visible_lines: usize,
     pub flashlight: bool,
 }
+impl Console {
+    /// Every console line so far (dev_console mirrors new ones to the
+    /// notify area).
+    pub(crate) fn lines(&self) -> &[String] {
+        &self.lines
+    }
+    pub(crate) fn push_lines(&mut self, lines: Vec<String>) {
+        self.lines.extend(lines);
+    }
+}
 #[derive(Component)]
 struct Panel;
 #[derive(Component)]
@@ -68,6 +78,10 @@ pub fn install(app: &mut App) {
             PostUpdate,
             light.after(bevy::transform::TransformSystems::Propagate),
         );
+    // Source `-console`: start with the console open.
+    if std::env::args().any(|a| a.eq_ignore_ascii_case("-console")) {
+        app.world_mut().resource_mut::<Console>().open = true;
+    }
     if std::env::args().any(|a| a == "--capture-flashlight") {
         app.world_mut().resource_mut::<Console>().flashlight = true;
     }
@@ -473,6 +487,11 @@ fn console(
                 (frame.parse::<u32>().ok()? == *game_frames).then(|| command.to_string())
             });
     }
+    // Source launch arguments (`-dev`, `+developer 2`, `+map c1m1_hotel`):
+    // one queued command per frame once loading is done.
+    if scripted.is_none() && frontend.page != Page::Loading {
+        scripted = crate::dev_console::next_startup_command();
+    }
     if !state.open && frontend.page == Page::Game && keys.just_pressed(KeyCode::KeyF) {
         state.flashlight = !state.flashlight;
     }
@@ -520,58 +539,10 @@ fn console(
         match key_code {
             KeyCode::Enter => {
                 let command = std::mem::take(&mut state.input);
-                if command.trim() == "quit" {
-                    actions.0.write(bevy::app::AppExit::Success);
-                } else {
-                    state.lines.push(format!("> {command}"));
-                    let out = if let Some(out) = catalog_command(&command) {
-                        out
-                    } else if let Some((file, code)) = script_request(&command) {
-                        if code.trim().is_empty() {
-                            "Usage: script <Squirrel code> / script_execute <filename>".into()
-                        } else {
-                            state.pending_scripts.push((file, code.into()));
-                            String::new()
-                        }
-                    } else if let Some(out) = display.command(&command) {
-                        out
-                    } else if let Some(out) = glow.command(&command) {
-                        out
-                    } else if let Some(out) =
-                        crate::special_infected::witch::command(&command, &mut actions.2)
-                    {
-                        out
-                    } else if let Some(out) = crate::special_infected::ai::command(&command) {
-                        out
-                    } else if let Some(out) = crate::multiplayer::command(&command) {
-                        out
-                    } else if let Some(out) = crate::survival::command(&command) {
-                        out
-                    } else {
-                        execute(
-                            &command,
-                            &mut state,
-                            &mut game,
-                            &rules,
-                            &mut body,
-                            &collision,
-                            &mut requests,
-                            &settings,
-                            &root.0,
-                            &mut frontend,
-                        )
-                    };
-                    if !state.open && frontend.page == Page::Game {
-                        game.paused = false;
-                    }
-                    if !out.is_empty() {
-                        // Capture runs log the reply (getpos etc.).
-                        if scripted.is_some() {
-                            println!("Capture reply: {out}");
-                        }
-                        state.lines.push(out);
-                    }
-                }
+                state.lines.push(format!("> {command}"));
+                // Source's command buffer: aliases, `;` lists, waits and
+                // testscripts run below (crate::source_commands).
+                crate::source_commands::submit(&command);
                 state.scroll = 0;
                 state.history.push(command);
                 state.cursor = state.history.len();
@@ -621,6 +592,79 @@ fn console(
                     }
                 }
             }
+        }
+    }
+    // Run the buffered commands that are ready this frame.
+    for item in crate::source_commands::take_ready(&root.0) {
+        let command = match item {
+            Ok(command) => command,
+            Err(line) => {
+                if std::env::args().any(|a| a == "--capture-game") {
+                    println!("Capture reply: {line}");
+                }
+                state.lines.push(line);
+                continue;
+            }
+        };
+        if command.trim() == "quit" {
+            actions.0.write(bevy::app::AppExit::Success);
+            continue;
+        }
+        let out = if let Some(out) = catalog_command(&command) {
+                        out
+                    } else if let Some((file, code)) = script_request(&command) {
+                        if code.trim().is_empty() {
+                            "Usage: script <Squirrel code> / script_execute <filename>".into()
+                        } else {
+                            state.pending_scripts.push((file, code.into()));
+                            String::new()
+                        }
+                    } else if let Some(out) = display.command(&command) {
+                        out
+                    } else if let Some(out) = glow.command(&command) {
+                        out
+                    } else if let Some(out) =
+                        crate::special_infected::witch::command(&command, &mut actions.2)
+                    {
+                        out
+                    } else if let Some(out) = crate::special_infected::ai::command(&command) {
+                        out
+                    } else if let Some(out) = crate::multiplayer::command(&command) {
+                        out
+                    } else if let Some(out) = crate::survival::command(&command) {
+                        out
+                    } else if let Some(out) = crate::dev_console::command(&command) {
+                        out
+                    } else {
+                        let out = execute(
+                            &command,
+                            &mut state,
+                            &mut game,
+                            &rules,
+                            &mut body,
+                            &collision,
+                            &mut requests,
+                            &settings,
+                            &root.0,
+                            &mut frontend,
+                        );
+                        // Settings retail scripts set that nothing here
+                        // implements are kept in the cvar table.
+                        if out.starts_with("Unknown command") {
+                            crate::source_commands::cvar_command(&command).unwrap_or(out)
+                        } else {
+                            out
+                        }
+                    };
+        if !state.open && frontend.page == Page::Game {
+            game.paused = false;
+        }
+        if !out.is_empty() {
+            // Capture runs log the reply (getpos etc.).
+            if scripted.is_some() || std::env::args().any(|a| a == "--capture-game") {
+                println!("Capture reply: {out}");
+            }
+            state.lines.push(out);
         }
     }
     if state.lines.len() > 2048 {

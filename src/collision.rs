@@ -870,6 +870,13 @@ impl Collision {
         };
         Some((t.fraction, t.end_pos.to_array(), t.texinfo, t.start_solid || t.all_solid))
     }
+    /// `source_ray` that also returns the hit plane normal (Source axes).
+    pub fn source_ray_normal(&self, start: [f32; 3], end: [f32; 3], mask: u32) -> Option<(f32, [f32; 3], [f32; 3])> {
+        let native = self.native.as_ref()?;
+        let (start, end, zero) = (l4d2r_math::Vec3::from_array(start), l4d2r_math::Vec3::from_array(end), l4d2r_math::Vec3::ZERO);
+        let t = native.lock().unwrap().box_trace(start, end, zero, zero, mask, 0, zero);
+        Some((t.fraction, t.end_pos.to_array(), t.normal.to_array()))
+    }
     /// Source MASK_SOLID_BRUSHONLY | MASK_WATER (solid, moveable, window,
     /// grate, water, slime), as env_soundscape's visibility trace uses.
     /// Returns whether the line is clear.

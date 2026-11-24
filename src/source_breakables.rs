@@ -186,6 +186,22 @@ fn inherited(
     values
 }
 
+/// A model's prop_data health, its own or inherited from its propdata.txt
+/// base (0: not breakable). Retail prop_dynamic refuses such models:
+/// "prop_dynamic has a health specified in model ...".
+pub fn model_health(assets: &mut SourceAssets, path: &str) -> f32 {
+    let Some(node) = model_data(assets, path) else { return 0. };
+    let Some(block) = node.children.get("prop_data") else { return 0. };
+    let parse = |v: Option<&String>| v.and_then(|v| v.trim().parse::<f32>().ok()).filter(|v| v.is_finite());
+    if let Some(h) = parse(block.values.get("health")) {
+        return h;
+    }
+    let Some(base) = block.values.get("base") else { return 0. };
+    let root = assets.read("scripts/propdata.txt").ok().map(|b| kv::blocks(&String::from_utf8_lossy(&b))).unwrap_or_default();
+    let data = root.children.get("propdata.txt").map(|b| b.children.clone()).unwrap_or_default();
+    parse(inherited(base, &data, 0).get("health")).unwrap_or(0.)
+}
+
 pub fn configure(assets: &mut SourceAssets, world: &mut EntityWorld) -> HashMap<usize, Durability> {
     let root = assets
         .read("scripts/propdata.txt")
@@ -483,6 +499,16 @@ mod tests {
         logic.restart();
         assert!(!logic.world.damage_entity(id,40.,l4d2r_game_core::entities::DamageKind::Bullet));
         assert_eq!(logic.world.durability[&id].health,maximum-40.);
+    }
+    #[test]
+    fn breakable_crate_and_fence_model_health_match_retail_prop_dynamic_create() {
+        // Retail refuses wood_crate001a ("prop_dynamic has a health
+        // specified") and accepts the fence used by EDIT WORLD.
+        let root = std::path::Path::new(r"C:\Program Files (x86)\Steam\steamapps\common\Left 4 Dead 2");
+        if !root.exists() { return; }
+        let mut assets = SourceAssets::new(root, vec![]).unwrap();
+        assert!(model_health(&mut assets, "models/props_junk/wood_crate001a.mdl") > 0.);
+        assert_eq!(model_health(&mut assets, "models/props_urban/fence_cover001_128.mdl"), 0.);
     }
     #[test]
     fn inherited_glass_damage_overrides_and_nested_door_settings() {

@@ -239,6 +239,10 @@ fn table_bytes(data: &[Vec4]) -> Vec<u8> {
         .collect()
 }
 impl LightingTable {
+    /// The shared lighting buffer (crate::runtime_props' materials).
+    pub(crate) fn buffer_handle(&self) -> Handle<bevy::render::storage::ShaderBuffer> {
+        self.buffer.clone()
+    }
     fn slot(&mut self, entity: Entity) -> Option<u32> {
         if let Some(slot) = self.owners.get(&entity) {
             return Some(*slot);
@@ -1411,6 +1415,103 @@ fn cubemap_image(c: &crate::vtf::Cubemap) -> Image {
     image.sampler = ImageSampler::linear();
     image
 }
+/// A model/world material's SourceMaterial: the map loader passes its
+/// preloaded texture tables, crate::runtime_props loads them on demand.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn source_material(
+    name: &str,
+    m: &crate::material::Material,
+    diffuse: &dyn Fn(&str) -> Option<Handle<Image>>,
+    normal: &dyn Fn(&str) -> Option<Handle<Image>>,
+    (envmap, envmap_tint, envmap_params): (Option<Handle<Image>>, Vec4, Vec4),
+    palette_heights: &HashMap<String, f32>,
+    lighting_buffer: Handle<bevy::render::storage::ShaderBuffer>,
+) -> SourceMaterial {
+    SourceMaterial {
+            base: StandardMaterial {
+                base_color: Color::linear_rgba(m.color[0], m.color[1], m.color[2], m.color[3]),
+                base_color_texture: m.base.as_ref().filter(|_| m.shader != "infected").and_then(|p| diffuse(p)),
+                normal_map_texture: m.normal.as_ref().and_then(|p| normal(p)),
+                flip_normal_map_y: true,
+                perceptual_roughness: 0.85,
+                lightmap_exposure: 1.,
+                // Source culls back faces unless $nocull, translucent or not:
+                // two-sided glass models (Hotel's hotel_window_glass001, a
+                // quad per side) otherwise blend twice and darken the view.
+                double_sided: m.nocull || survivor_skin(name),
+                cull_mode: if m.nocull || survivor_skin(name) {
+                    None
+                } else {
+                    Some(bevy::render::render_resource::Face::Back)
+                },
+                alpha_mode: match m.alpha {
+                    _ if m.fence => AlphaMode::Blend,
+                    1 => AlphaMode::Mask(m.cutoff),
+                    2 => AlphaMode::Blend,
+                    3 => AlphaMode::Add,
+                    _ => AlphaMode::Opaque,
+                },
+                unlit: m.unlit,
+                ..default()
+            },
+            extension: SourceLighting {
+                settings: Vec4::new(1., 0., 0., 0.),
+                ambient_cube: [Vec4::ZERO; 6],
+                sun_direction: Vec4::ZERO,
+                sun_color: Vec4::ZERO,
+                lightmap: None,
+                // z: the fence state's alpha-test reference (SOURCE_FENCE).
+                lightmap_params: Vec4::new(
+                    0.,
+                    0.,
+                    if m.fence { m.cutoff.max(1. / 255.) } else { 0. },
+                    // w: $halflambert (SOURCE_HALF_LAMBERT).
+                    if m.half_lambert { 1. } else { 0. },
+                ),
+                lighting_table: lighting_buffer,
+                wound_rows: [Vec4::ZERO; 12],
+                wound: m.wound.as_ref().map(WoundUniform::from_material).unwrap_or_default(),
+                wound_mask: m.wound.as_ref().and_then(|w| normal(&w.texture)),
+                infected_base: m.base.as_ref().filter(|_| m.shader == "infected").and_then(|p| normal(p)),
+                infected_palette: m.palette.as_ref().and_then(|(p, _, _)| diffuse(p)),
+                infected_lookup: m.palette.as_ref().map_or(Vec4::ZERO, |(p, skin, cloth)| {
+                    let height = palette_heights.get(p).copied().unwrap_or(16.);
+                    let sheet = m.wound.as_ref().map_or(0, |w| w.sheet);
+                    Vec4::new((sheet / 2) as f32 * 0.5, (sheet % 2) as f32 * 0.5,
+                        (*skin as f32 + 0.5) / height, (*cloth as f32 + 0.5) / height)
+                }),
+                infected_phong: m.infected_phong.as_ref().map(InfectedPhongUniform::from).unwrap_or_default(),
+                infected_detail: m.infected_detail.as_ref().and_then(|p| normal(p)),
+                infected_burn: m.infected_burn.as_ref().and_then(|p| diffuse(p)),
+                cap_phong: m.cap_phong.as_ref().map(CapPhongUniform::from).unwrap_or_default(),
+                glass_mask: None,
+                envmap,
+                envmap_tint,
+                envmap_params,
+                // y: $ssbump; x is set on the lightmapped world copy.
+                bump: Vec4::new(0., if m.ssbump { 1. } else { 0. }, 0., 0.),
+                // Models: the Phong exponent texture shares the slot.
+                bump_map: m.bump.as_ref()
+                    .or_else(|| m.cap_phong.as_ref().and_then(|c| c.exponent_texture.as_ref()))
+                    .and_then(|p| normal(p)),
+                // Debug: L4D2R_NO_BLEND drops $basetexture2; L4D2R_BLEND_SWAP
+                // blends $basetexture with itself.
+                blend_texture: if std::env::var_os("L4D2R_NO_BLEND").is_some() {
+                    None
+                } else if std::env::var_os("L4D2R_BLEND_SWAP").is_some() {
+                    m.base2.as_ref().and(m.base.as_ref()).and_then(|p| diffuse(p))
+                } else {
+                    m.base2.as_ref().and_then(|p| diffuse(p))
+                },
+                blend_modulate: m.blend_modulate.as_ref().and_then(|p| normal(p)),
+                emission: m.emission_mask.as_ref()
+                    .or_else(|| m.cap_phong.as_ref().and_then(|c| c.lightwarp.as_ref()))
+                    .and_then(|p| normal(p)),
+                emission_tint: Vec4::new(m.emission_tint[0],m.emission_tint[1],m.emission_tint[2],if m.emission.is_some() {if m.emission_mask.is_some() {2.} else {1.}} else {0.}),
+            },
+    }
+}
+
 fn survivor_skin(material: &str) -> bool {
     material.to_ascii_lowercase().replace('\\', "/").contains("models/survivors/")
 }
@@ -1886,7 +1987,7 @@ fn sky_image(scene: &Scene) -> Option<Image> {
     image.sampler = ImageSampler::linear();
     Some(image)
 }
-fn mesh(
+pub(crate) fn mesh(
     positions: Vec<[f32; 3]>,
     normals: Option<Vec<[f32; 3]>>,
     uv: Vec<[f32; 2]>,
@@ -2125,89 +2226,15 @@ fn setup(
     };
     for (name, m) in &scene.materials {
         let (envmap, envmap_tint, envmap_params) = envmap_for(m);
-        let handle = materials.add(SourceMaterial {
-            base: StandardMaterial {
-                base_color: Color::linear_rgba(m.color[0], m.color[1], m.color[2], m.color[3]),
-                base_color_texture: m.base.as_ref().filter(|_| m.shader != "infected").and_then(|p| diffuse.get(p)).cloned(),
-                normal_map_texture: m.normal.as_ref().and_then(|p| normal.get(p)).cloned(),
-                flip_normal_map_y: true,
-                perceptual_roughness: 0.85,
-                lightmap_exposure: 1.,
-                // Source culls back faces unless $nocull, translucent or not:
-                // two-sided glass models (Hotel's hotel_window_glass001, a
-                // quad per side) otherwise blend twice and darken the view.
-                double_sided: m.nocull || survivor_skin(name),
-                cull_mode: if m.nocull || survivor_skin(name) {
-                    None
-                } else {
-                    Some(bevy::render::render_resource::Face::Back)
-                },
-                alpha_mode: match m.alpha {
-                    _ if m.fence => AlphaMode::Blend,
-                    1 => AlphaMode::Mask(m.cutoff),
-                    2 => AlphaMode::Blend,
-                    3 => AlphaMode::Add,
-                    _ => AlphaMode::Opaque,
-                },
-                unlit: m.unlit,
-                ..default()
-            },
-            extension: SourceLighting {
-                settings: Vec4::new(1., 0., 0., 0.),
-                ambient_cube: [Vec4::ZERO; 6],
-                sun_direction: Vec4::ZERO,
-                sun_color: Vec4::ZERO,
-                lightmap: None,
-                // z: the fence state's alpha-test reference (SOURCE_FENCE).
-                lightmap_params: Vec4::new(
-                    0.,
-                    0.,
-                    if m.fence { m.cutoff.max(1. / 255.) } else { 0. },
-                    // w: $halflambert (SOURCE_HALF_LAMBERT).
-                    if m.half_lambert { 1. } else { 0. },
-                ),
-                lighting_table: lighting_table.buffer.clone(),
-                wound_rows: [Vec4::ZERO; 12],
-                wound: m.wound.as_ref().map(WoundUniform::from_material).unwrap_or_default(),
-                wound_mask: m.wound.as_ref().and_then(|w| normal.get(&w.texture)).cloned(),
-                infected_base: m.base.as_ref().filter(|_| m.shader == "infected").and_then(|p| normal.get(p)).cloned(),
-                infected_palette: m.palette.as_ref().and_then(|(p, _, _)| diffuse.get(p)).cloned(),
-                infected_lookup: m.palette.as_ref().map_or(Vec4::ZERO, |(p, skin, cloth)| {
-                    let height = palette_heights.get(p).copied().unwrap_or(16.);
-                    let sheet = m.wound.as_ref().map_or(0, |w| w.sheet);
-                    Vec4::new((sheet / 2) as f32 * 0.5, (sheet % 2) as f32 * 0.5,
-                        (*skin as f32 + 0.5) / height, (*cloth as f32 + 0.5) / height)
-                }),
-                infected_phong: m.infected_phong.as_ref().map(InfectedPhongUniform::from).unwrap_or_default(),
-                infected_detail: m.infected_detail.as_ref().and_then(|p| normal.get(p)).cloned(),
-                infected_burn: m.infected_burn.as_ref().and_then(|p| diffuse.get(p)).cloned(),
-                cap_phong: m.cap_phong.as_ref().map(CapPhongUniform::from).unwrap_or_default(),
-                glass_mask: None,
-                envmap,
-                envmap_tint,
-                envmap_params,
-                // y: $ssbump; x is set on the lightmapped world copy.
-                bump: Vec4::new(0., if m.ssbump { 1. } else { 0. }, 0., 0.),
-                // Models: the Phong exponent texture shares the slot.
-                bump_map: m.bump.as_ref()
-                    .or_else(|| m.cap_phong.as_ref().and_then(|c| c.exponent_texture.as_ref()))
-                    .and_then(|p| normal.get(p)).cloned(),
-                // Debug: L4D2R_NO_BLEND drops $basetexture2; L4D2R_BLEND_SWAP
-                // blends $basetexture with itself.
-                blend_texture: if std::env::var_os("L4D2R_NO_BLEND").is_some() {
-                    None
-                } else if std::env::var_os("L4D2R_BLEND_SWAP").is_some() {
-                    m.base2.as_ref().and(m.base.as_ref()).and_then(|p| diffuse.get(p)).cloned()
-                } else {
-                    m.base2.as_ref().and_then(|p| diffuse.get(p)).cloned()
-                },
-                blend_modulate: m.blend_modulate.as_ref().and_then(|p| normal.get(p)).cloned(),
-                emission: m.emission_mask.as_ref()
-                    .or_else(|| m.cap_phong.as_ref().and_then(|c| c.lightwarp.as_ref()))
-                    .and_then(|p|normal.get(p)).cloned(),
-                emission_tint: Vec4::new(m.emission_tint[0],m.emission_tint[1],m.emission_tint[2],if m.emission.is_some() {if m.emission_mask.is_some() {2.} else {1.}} else {0.}),
-            },
-        });
+        let handle = materials.add(source_material(
+            name,
+            m,
+            &|p: &str| diffuse.get(p).cloned(),
+            &|p: &str| normal.get(p).cloned(),
+            (envmap, envmap_tint, envmap_params),
+            &palette_heights,
+            lighting_table.buffer.clone(),
+        ));
         material_handles.insert(name.clone(), handle);
     }
     // Keep 3D-sky fragments behind all playable geometry, as Source's

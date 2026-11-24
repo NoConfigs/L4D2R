@@ -36,6 +36,8 @@ namespace L4D2R.Launcher
         private readonly LauncherService service;
         private VideoSettings video;
         private readonly TextBox game = new TextBox();
+        // Source-style launch options (-dev, -console, +developer 2, +map ...).
+        private readonly TextBox launchOptions = new TextBox();
         private readonly ModernButton browse = new ModernButton(), detect = new ModernButton(), play = new ModernButton(), rebuild = new ModernButton(), save = new ModernButton(), cancel = new ModernButton();
         private readonly ModernButton videoNav = new ModernButton(), logNav = new ModernButton(), androidNav = new ModernButton(), buildApk = new ModernButton();
         private readonly ComboBox apkMode = new ChoiceBox();
@@ -129,9 +131,9 @@ namespace L4D2R.Launcher
             var videoLayout = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Margin = Padding.Empty, BackColor = Color.Transparent };
             videoLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48)); videoLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); videoLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
             videoLayout.Controls.Add(new SectionTitle("Video") { Dock = DockStyle.Fill, Margin = Padding.Empty }, 0, 0);
-            var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 6, Margin = Padding.Empty, BackColor = Color.Transparent };
+            var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 7, Margin = Padding.Empty, BackColor = Color.Transparent };
             for (int i = 0; i < 4; i++) grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, i % 2 == 0 ? 20 : 30));
-            for (int i = 0; i < 6; i++) grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 6));
+            for (int i = 0; i < 7; i++) grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100f / 7));
             videoLayout.Controls.Add(grid, 0, 1); videoPage.Controls.Add(videoLayout);
             Combo(aspect, new[] { "Widescreen 16:9", "Normal 4:3", "Widescreen 16:10" });
             Combo(resolution, VideoSettings.Resolutions[0]); Combo(display, new[] { "Windowed", "Borderless", "Fullscreen" });
@@ -147,6 +149,9 @@ namespace L4D2R.Launcher
             Row(grid, 4, "Effect detail", effects, "Model / texture", detail);
             vsync.Text = "Vertical sync"; fps.Text = "Show FPS"; vsync.Dock = fps.Dock = DockStyle.Fill;
             grid.Controls.Add(vsync, 0, 5); grid.SetColumnSpan(vsync, 2); grid.Controls.Add(fps, 2, 5); grid.SetColumnSpan(fps, 2);
+            launchOptions.AccessibleName = "Launch options"; launchOptions.Anchor = AnchorStyles.Left | AnchorStyles.Right; launchOptions.Margin = new Padding(0, 4, 0, 4);
+            launchOptions.BackColor = Theme.Card; launchOptions.ForeColor = Theme.Text; launchOptions.BorderStyle = BorderStyle.FixedSingle; launchOptions.Font = Theme.Body(10);
+            grid.Controls.Add(FieldLabel("Launch options"), 0, 6); grid.Controls.Add(launchOptions, 1, 6); grid.SetColumnSpan(launchOptions, 3);
             videoLayout.Controls.Add(new Label { Text = "Applies on the next launch. MSAA falls back to the highest level your GPU supports.", Dock = DockStyle.Fill, Font = Theme.Body(9), ForeColor = Theme.Disabled, BackColor = Color.Transparent, TextAlign = ContentAlignment.BottomLeft }, 0, 2);
 
             // Build log page.
@@ -252,6 +257,7 @@ namespace L4D2R.Launcher
                 shader.SelectedIndex = Int32.Parse(g["shader"]); effects.SelectedIndex = Int32.Parse(g["effects"]); detail.SelectedIndex = Int32.Parse(g["detail"]);
                 brightness.Value = (decimal)(VideoSettings.Number(g, "brightness", 1, .5, 1.5) * 100); grain.Value = (decimal)(VideoSettings.Number(g, "grain", 0, 0, 1) * 100);
                 vsync.Checked = VideoSettings.Bool(video.Display, "vsync"); fps.Checked = VideoSettings.Bool(video.Display, "show_fps");
+                launchOptions.Text = service.LaunchOptions;
             }
             finally { loading = false; }
         }
@@ -265,6 +271,7 @@ namespace L4D2R.Launcher
             VideoSettings.Set(g, "brightness", (double)brightness.Value / 100); VideoSettings.Set(g, "grain", (double)grain.Value / 100);
             VideoSettings.Set(g, "shader", shader.SelectedIndex); VideoSettings.Set(g, "effects", effects.SelectedIndex); VideoSettings.Set(g, "detail", detail.SelectedIndex);
             video.Display["vsync"] = vsync.Checked ? "true" : "false"; video.Display["show_fps"] = fps.Checked ? "true" : "false"; video.Save(service.Root);
+            service.LaunchOptions = launchOptions.Text;
         }
         private void SetStatus(string text, bool error) { status.Text = text; status.ForeColor = error ? Theme.AccentHot : Theme.Muted; }
         private void RefreshState()
