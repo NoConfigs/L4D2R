@@ -3032,6 +3032,18 @@ mod tests {
         assert_eq!(d.iter().map(|v|v.child_delay).collect::<Vec<_>>(),vec![0.,0.5,0.75]);
         assert_eq!(emission_overlap(0.7-d[2].child_delay,0.1,0.,0.),0.);
     }
+    #[test]
+    fn inferno_wall_flattens_parent_and_its_three_children() {
+        let root=std::path::Path::new(r"C:\Program Files (x86)\Steam\steamapps\common\Left 4 Dead 2");if !root.exists(){return;}
+        let mut assets=SourceAssets::new(root,vec![]).unwrap();
+        let elements=source_pcf::parse(&assets.read("particles/fire_01.pcf").unwrap()).unwrap();
+        let i=elements.iter().position(|e|e.name=="inferno_wall"&&e.kind=="DmeParticleSystemDefinition").unwrap();
+        let mut d=vec![];flatten(&elements,i,&mut HashSet::new(),&mut d);
+        let materials=d.iter().map(|d|format!("{} r{} p{:?}",d.material,d.renderers.len(),d.parent)).collect::<Vec<_>>();
+        // inferno_wall: low flames, occlusion puffs, embers (flat_depth
+        // belongs to inferno_wall_flat).
+        assert_eq!(d.len(),4,"{materials:#?}");
+    }
     /// L4D2R_PCF_DUMP=<definition>: prints that definition tree (children,
     /// functions and their attributes) from whichever PCF holds it.
     #[test]

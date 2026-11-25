@@ -10,7 +10,9 @@
 //! Keys while editing: LMB place, RMB select, [ ] previous/next model,
 //! / search models, arrows and PageUp/PageDown move 8 units, Q/E rotate 15
 //! degrees, Delete remove, Ctrl+D duplicate, F5 play/edit, F6 save,
-//! F7 load the last saved file.
+//! F7 load the last saved file. Enter opens the inspector line for the
+//! selected object (see `apply_line`): keyvalues, class name, outputs,
+//! one-word OnTakeDamage pickups (`give`, `health`) and new entities.
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input::ButtonState;
 use bevy::prelude::*;
@@ -30,6 +32,8 @@ pub struct Editor {
     models: Vec<String>,
     model: usize,
     search: Option<String>,
+    /// The inspector line being typed (Enter opens, Enter applies).
+    command: Option<String>,
     next_hammer: u32,
     status: String,
     last_file: Option<String>,
@@ -173,7 +177,48 @@ fn input(
         mouse.reset_all();
         return;
     }
+    // Inspector line: Enter opens it, Enter applies, Escape cancels.
+    if let Some(line) = editor.command.as_mut() {
+        let mut done = None;
+        for e in typed.read().filter(|e| e.state == ButtonState::Pressed) {
+            match e.key_code {
+                KeyCode::Enter => done = Some(true),
+                KeyCode::Escape => done = Some(false),
+                KeyCode::Backspace => {
+                    line.pop();
+                }
+                _ => {
+                    if let Some(t) = &e.text {
+                        line.extend(t.chars().filter(|c| !c.is_control()));
+                    }
+                }
+            }
+        }
+        if let Some(apply) = done {
+            let line = editor.command.take().unwrap_or_default();
+            if apply && !line.trim().is_empty() {
+                let aim = camera.iter().next().map(|view| {
+                    let (eye, forward) = (view.translation(), view.forward().as_vec3());
+                    collision
+                        .as_ref()
+                        .and_then(|c| c.source_ray(source(eye), source(eye + forward * 200.), 0x1 | 0x2 | 0x8, true))
+                        .map_or(source(eye + forward * 3.), |(_, p, _, _)| p)
+                });
+                let at = aim.map_or(l4d2r_math::Vec3::ZERO, l4d2r_math::Vec3::from_array);
+                let status = apply_line(&mut editor, &mut logic, &line, at);
+                editor.status = status;
+            }
+        }
+        keys.reset_all();
+        mouse.reset_all();
+        return;
+    }
     typed.clear();
+    if keys.just_pressed(KeyCode::Enter) {
+        editor.command = Some(String::new());
+        keys.reset_all();
+        return;
+    }
     if keys.just_pressed(KeyCode::Slash) {
         editor.search = Some(String::new());
     }
@@ -298,6 +343,80 @@ fn input(
             None => editor.status = "Nothing saved yet (F6)".into(),
         }
     }
+}
+
+/// Applies one inspector line to the selected object; returns the status.
+///
+/// - `key value...`: a keyvalue (`name` is short for targetname;
+///   `classname` renames the class used for targeting, as retail's
+///   ClassName keyvalue does).
+/// - `OnOutput target,input[,param[,delay[,times]]]`: adds an output.
+/// - `-key` / `-OnOutput`: removes that keyvalue / every such output.
+/// - `give <item>` / `health`: OnTakeDamage runs `give <item>` through a
+///   point_clientcommand named PD1 (created if missing), as bmap.txt does.
+/// - `new <classname>`: a logic entity at the crosshair (selected).
+pub fn apply_line(editor: &mut Editor, logic: &mut crate::l4d2r_cinematic::MapLogic, line: &str, at: l4d2r_math::Vec3) -> String {
+    let line = line.trim();
+    let (word, rest) = line.split_once(char::is_whitespace).map_or((line, ""), |(w, r)| (w, r.trim()));
+    let lower = word.to_ascii_lowercase();
+    if lower == "new" {
+        if rest.is_empty() || rest.contains(char::is_whitespace) {
+            return "Usage: new <classname> (e.g. new logic_relay)".into();
+        }
+        let hammer = next_hammer(editor, logic);
+        let name = format!("edit_{hammer}");
+        let kv = vec![("targetname".to_string(), name.clone()), ("hammerid".to_string(), hammer.to_string())];
+        let id = logic.world.create_entity(&rest.to_ascii_lowercase(), &kv, at, l4d2r_math::Vec3::ZERO, None);
+        crate::dev_console::SPAWNED.lock().unwrap().push(id);
+        editor.objects.push(id);
+        editor.selected = Some(id);
+        return format!("Created {} {name}", rest.to_ascii_lowercase());
+    }
+    let Some(id) = editor.selected.filter(|&id| logic.world.ents.get(id).is_some_and(|e| e.alive)) else {
+        return "Select an object first (RMB), or: new <classname>".into();
+    };
+    if lower == "give" || lower == "health" {
+        let item = if lower == "health" { "health" } else { rest };
+        if item.is_empty() || item.contains(char::is_whitespace) {
+            return "Usage: give <item> (e.g. give rifle_ak47, give first_aid_kit)".into();
+        }
+        if logic.world.find("PD1").is_empty() {
+            let hammer = next_hammer(editor, logic);
+            let kv = vec![("targetname".to_string(), "PD1".to_string()), ("hammerid".to_string(), hammer.to_string())];
+            let pd = logic.world.create_entity("point_clientcommand", &kv, l4d2r_math::Vec3::ZERO, l4d2r_math::Vec3::ZERO, None);
+            crate::dev_console::SPAWNED.lock().unwrap().push(pd);
+            editor.objects.push(pd);
+        }
+        logic.world.set_keyvalue(id, "OnTakeDamage", &format!("PD1,Command,give {item}"));
+        return format!("OnTakeDamage -> PD1 give {item} (damage it to test, F5)");
+    }
+    if let Some(key) = word.strip_prefix('-') {
+        let key_lower = key.to_ascii_lowercase();
+        let e = &mut logic.world.ents[id];
+        if key_lower.starts_with("on") {
+            let before = e.conns.len();
+            e.conns.retain(|c| !c.output.eq_ignore_ascii_case(key));
+            return format!("Removed {} {key} output(s)", before - e.conns.len());
+        }
+        if matches!(key_lower.as_str(), "classname" | "hammerid" | "targetname" | "model" | "origin" | "angles") {
+            return format!("{key} can't be removed (set a new value instead)");
+        }
+        let before = e.me.ent.0.len();
+        e.me.ent.0.retain(|(k, _)| !k.eq_ignore_ascii_case(key));
+        return if e.me.ent.0.len() < before { format!("Removed {key}") } else { format!("No keyvalue {key}") };
+    }
+    if rest.is_empty() {
+        return "Usage: <key> <value>, <OnOutput> <target,input,param>, -<key>, give <item>, new <class>".into();
+    }
+    let key = if lower == "name" { "targetname" } else { word };
+    if key.to_ascii_lowercase().starts_with("on") && rest.split(',').count() < 2 {
+        return format!("Usage: {key} <target>,<input>[,<param>[,<delay>]]");
+    }
+    if key.eq_ignore_ascii_case("hammerid") && rest.parse::<u32>().map_or(true, |n| n <= 1000) {
+        return "HammerId must be a number above 1000".into();
+    }
+    logic.world.set_keyvalue(id, key, rest);
+    format!("{key} = {rest}")
 }
 
 /// The lowest unused HammerId above 1000.
@@ -461,12 +580,25 @@ fn overlay(
     let text = if show {
         let model = editor.models.get(editor.model).map_or("(no models)", |m| m.as_str());
         let search = editor.search.as_ref().map_or(String::new(), |s| format!("\nSearch: {s}_"));
+        let search = match &editor.command {
+            Some(line) => format!("{search}\n> {line}_   (Enter apply, Esc cancel: key value | OnTakeDamage PD1,Command,give health | -key | give <item> | health | new <class>)"),
+            None => search,
+        };
         let selected = match (editor.selected, logic.as_ref()) {
             (Some(id), Some(logic)) if logic.world.ents.get(id).is_some_and(|e| e.alive) => {
                 let e = &logic.world.ents[id];
                 let o = e.me.origin;
                 let a = e.me.angles;
                 let outputs: String = e.conns.iter().map(|c| format!("\n  {} -> {},{},{}", c.output, c.target, c.input, c.param)).collect();
+                let keyvalues: String = e
+                    .me
+                    .ent
+                    .0
+                    .iter()
+                    .filter(|(k, _)| !matches!(k.to_ascii_lowercase().as_str(), "targetname" | "hammerid" | "origin" | "angles"))
+                    .map(|(k, v)| format!("\n  {k} = {v}"))
+                    .collect();
+                let outputs = format!("{keyvalues}{outputs}");
                 format!(
                     "\nSelected ({id}) {} [{}] HammerId {}\n  origin {:.0} {:.0} {:.0}  angles {:.0} {:.0} {:.0}{outputs}",
                     e.me.targetname,
@@ -478,7 +610,7 @@ fn overlay(
             _ => "\nNothing selected (RMB)".into(),
         };
         format!(
-            "EDIT WORLD   {}\nModel [ ]: {model}{search}{selected}\nLMB place  RMB select  arrows/PgUp/PgDn move  Q/E rotate  Del  Ctrl+D  F5 play  F6 save  F7 load",
+            "EDIT WORLD   {}\nModel [ ]: {model}{search}{selected}\nLMB place  RMB select  Enter edit  arrows/PgUp/PgDn move  Q/E rotate  Del  Ctrl+D  F5 play  F6 save  F7 load",
             editor.status
         )
     } else {
@@ -537,6 +669,18 @@ mod tests {
         assert!(text.contains("ent_create point_clientcommand;"), "{text}");
         assert!(text.contains("ent_fire point_clientcommand addoutput \"TargetName PD1\";"), "{text}");
         assert!(text.contains("ent_fire PD1 addoutput \"classname l4d2r_edit_point_clientcommand\";"), "{text}");
+        // The inspector line builds the same objects.
+        let mut editor = Editor { selected: Some(crate_id), objects: vec![crate_id], ..Default::default() };
+        assert_eq!(apply_line(&mut editor, &mut logic, "name fence2", l4d2r_math::Vec3::ZERO), "targetname = fence2");
+        assert_eq!(logic.world.ents[crate_id].me.targetname, "fence2");
+        apply_line(&mut editor, &mut logic, "give rifle_ak47", l4d2r_math::Vec3::ZERO);
+        assert!(logic.world.ents[crate_id].conns.iter().any(|c| c.output == "OnTakeDamage" && c.param == "give rifle_ak47"));
+        assert!(apply_line(&mut editor, &mut logic, "-OnTakeDamage", l4d2r_math::Vec3::ZERO).starts_with("Removed 2"));
+        assert!(logic.world.ents[crate_id].conns.is_empty());
+        assert_eq!(apply_line(&mut editor, &mut logic, "hammerid 12", l4d2r_math::Vec3::ZERO), "HammerId must be a number above 1000");
+        let relay = apply_line(&mut editor, &mut logic, "new logic_relay", l4d2r_math::Vec3::new(1., 2., 3.));
+        assert!(relay.starts_with("Created logic_relay edit_"), "{relay}");
+        assert_eq!(editor.objects.len(), 2);
         // Every line splits into well-formed commands (quotes balanced).
         for command in crate::source_commands::split(&text) {
             assert_eq!(command.matches('"').count() % 2, 0, "{command}");

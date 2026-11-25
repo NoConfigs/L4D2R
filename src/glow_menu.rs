@@ -43,22 +43,41 @@ pub const COLOURS: &[(&str, &str)] = &[
     ("cl_glow_ability_colorblind", "Ability (colourblind)"),
 ];
 
-/// The cvars a glow preset holds: every colour channel.
+/// Glow strength settings: (cvar, label, step, min, max) in the ranges
+/// crate::survivor_glow applies.
+pub const TUNES: &[(&str, &str, f32, f32, f32)] = &[
+    ("cl_glow_brightness", "Brightness", 0.1, 0., 5.),
+    ("cl_glow_blur_scale", "Blur", 0.5, 0., 12.),
+];
+
+/// The cvars a glow preset holds: every colour channel, then the tunes.
 fn preset_keys() -> Vec<String> {
-    COLOURS.iter().flat_map(|(p, _)| ["r", "g", "b"].map(|c| format!("{p}_{c}"))).collect()
+    COLOURS
+        .iter()
+        .flat_map(|(p, _)| ["r", "g", "b"].map(|c| format!("{p}_{c}")))
+        .chain(TUNES.iter().map(|t| t.0.to_string()))
+        .collect()
+}
+
+/// A preset value clamped to its range (colours 0..1).
+fn clamp_value(key: &str, v: f32) -> f32 {
+    match TUNES.iter().find(|t| t.0 == key) {
+        Some(t) => v.clamp(t.3, t.4),
+        None => v.clamp(0., 1.),
+    }
 }
 
 /// A retail cfg of the current colours.
 pub fn to_cfg(settings: &GlowSettings) -> String {
     let mut out = String::from("// Glow colours (L4D2 Rewrite OPTIONS > GLOWS). Works in retail: exec this file.\n");
     for key in preset_keys() {
-        out.push_str(&format!("{key} \"{}\"\n", trim(settings.get(&key, 0.))));
+        out.push_str(&format!("{key} \"{}\"\n", trim(clamp_value(&key, settings.get(&key, 0.)))));
     }
     out
 }
 
 fn trim(v: f32) -> String {
-    let s = format!("{:.3}", v.clamp(0., 1.));
+    let s = format!("{:.3}", v);
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s.is_empty() { "0".into() } else { s.to_string() }
 }
@@ -78,7 +97,8 @@ pub fn parse_cfg(text: &str) -> Vec<(String, f32)> {
             }
             if let Ok(v) = value.parse::<f32>() {
                 if v.is_finite() {
-                    out.push((name, v.clamp(0., 1.)));
+                    let v = clamp_value(&name, v);
+                    out.push((name, v));
                 }
             }
         }
@@ -134,6 +154,8 @@ struct Status;
 #[derive(Component)]
 struct PresetList;
 #[derive(Component)]
+struct TuneValue(usize);
+#[derive(Component)]
 struct PresetRow;
 #[derive(Component, Clone, Copy, PartialEq)]
 enum Act {
@@ -146,6 +168,7 @@ enum Act {
     OpenFolder,
     View(bool),
     Load(usize),
+    Tune(usize, i32),
     Delete(usize),
 }
 /// A preview outline: which colour it shows in which view (None: hidden).
@@ -326,6 +349,15 @@ fn setup(
             commands.entity(t).insert(GlowLabel { survivor: s_label, infected: i_label }).entry::<Node>().and_modify(|mut n| n.justify_content = JustifyContent::Center);
         }
     }
+    // Glow strength, in the preview's free slot.
+    for (i, (_, label, ..)) in TUNES.iter().enumerate() {
+        let y = 384. + i as f32 * 62.;
+        text(&mut commands, preview, &font, label, 14., rect(338., y, 100., 20.));
+        button(&mut commands, preview, &font, "<", rect(338., y + 22., 24., 24.), Act::Tune(i, -1));
+        let v = text(&mut commands, preview, &font, "", 15., rect(368., y + 24., 40., 22.));
+        commands.entity(v).insert(TuneValue(i));
+        button(&mut commands, preview, &font, ">", rect(410., y + 22., 24., 24.), Act::Tune(i, 1));
+    }
     let status = text(&mut commands, root, &font, "", 15., rect(130., 668., 1000., 22.));
     commands.entity(status).insert(Status);
     button(&mut commands, root, &font, "DONE", rect(40., 664., 80., 30.), Act::Done);
@@ -477,6 +509,11 @@ fn interact(
                     state.status = format!("Loaded {} ({} values).", stem(path), values.len());
                 }
             }
+            Act::Tune(i, dir) => {
+                let (key, _, step, lo, hi) = TUNES[i];
+                let v = ((settings.get(key, 1.) + step * dir as f32) / step).round() * step;
+                settings.values.insert(key.into(), v.clamp(lo, hi));
+            }
             Act::Delete(i) => {
                 if let Some(path) = preset_files().get(i) {
                     state.status = match std::fs::remove_file(path) {
@@ -592,6 +629,7 @@ fn paint(
         Query<&mut Text, With<SelectedName>>,
         Query<&mut Text, With<Status>>,
         Query<(&GlowLabel, &mut Text)>,
+        Query<(&TuneValue, &mut Text)>,
     )>,
     mut glows: Query<(&Glow, &mut Outline, &mut BoxShadow, &mut Visibility, &ChildOf), Without<Shared>>,
     mut shared: Query<(&ChildOf, &mut Outline, &mut BoxShadow, &mut Visibility), With<Shared>>,
@@ -637,7 +675,12 @@ fn paint(
     for (l, mut t) in &mut texts.p3() {
         t.0 = (if view { l.infected } else { l.survivor }).to_string();
     }
-    let brightness = settings.get("cl_glow_brightness", 1.).clamp(0.2, 3.);
+    for (tune, mut t) in &mut texts.p4() {
+        t.0 = format!("{:.1}", settings.get(TUNES[tune.0].0, 0.));
+    }
+    let brightness = settings.get("cl_glow_brightness", 1.).clamp(0., 5.);
+    // cl_glow_blur_scale 3 (retail default) draws the preview's 14px glow.
+    let blur = settings.get("cl_glow_blur_scale", 3.).clamp(0., 12.) / 3.;
     let mut slot_paint = std::collections::HashMap::new();
     for (glow, mut outline, mut shadow, mut vis, parent) in &mut glows {
         let key = if view { glow.infected } else { glow.survivor };
@@ -646,11 +689,11 @@ fn paint(
             to_color(c)
         });
         slot_paint.insert(parent.parent(), paint);
-        apply(paint, &mut outline, &mut shadow, &mut vis);
+        apply(paint, blur, &mut outline, &mut shadow, &mut vis);
     }
     for (parent, mut outline, mut shadow, mut vis) in &mut shared {
         let paint = slot_paint.get(&parent.parent()).copied().flatten();
-        apply(paint, &mut outline, &mut shadow, &mut vis);
+        apply(paint, blur, &mut outline, &mut shadow, &mut vis);
     }
     for (act, mut bg) in &mut view_buttons {
         if let Act::View(infected) = act {
@@ -659,13 +702,15 @@ fn paint(
     }
 }
 
-fn apply(paint: Option<Color>, outline: &mut Outline, shadow: &mut BoxShadow, vis: &mut Visibility) {
+fn apply(paint: Option<Color>, blur: f32, outline: &mut Outline, shadow: &mut BoxShadow, vis: &mut Visibility) {
     match paint {
         Some(c) => {
             *vis = Visibility::Inherited;
             outline.color = c;
             if let Some(s) = shadow.0.first_mut() {
                 s.color = c.with_alpha(0.85);
+                s.blur_radius = px(14. * blur);
+                s.spread_radius = px(2. * blur.min(1.));
             }
         }
         None => *vis = Visibility::Hidden,
@@ -736,11 +781,17 @@ mod tests {
         assert!(cfg.contains("cl_glow_item_r \"0.2\""), "{cfg}");
         assert!(cfg.contains("cl_witch_glow_angry_r \"1\""), "{cfg}");
         let back = parse_cfg(&cfg);
-        assert_eq!(back.len(), COLOURS.len() * 3);
+        assert_eq!(back.len(), COLOURS.len() * 3 + TUNES.len());
+        assert!(cfg.contains("cl_glow_blur_scale \"3\""), "{cfg}");
         assert!(back.contains(&("cl_glow_item_r".to_string(), 0.2)));
         // Retail syntax: quotes optional, ; separated, comments, other cvars ignored.
-        let v = parse_cfg("sv_cheats 1; cl_glow_survivor_r 0.5 // x\nCL_GLOW_ITEM_FAR_G \"2\"\ncl_glow_brightness 3");
-        assert_eq!(v, vec![("cl_glow_survivor_r".to_string(), 0.5), ("cl_glow_item_far_g".to_string(), 1.)]);
+        let v = parse_cfg("sv_cheats 1; cl_glow_survivor_r 0.5 // x\nCL_GLOW_ITEM_FAR_G \"2\"\ncl_glow_brightness 3\ncl_glow_blur_scale 99");
+        assert_eq!(v, vec![
+            ("cl_glow_survivor_r".to_string(), 0.5),
+            ("cl_glow_item_far_g".to_string(), 1.),
+            ("cl_glow_brightness".to_string(), 3.),
+            ("cl_glow_blur_scale".to_string(), 12.),
+        ]);
     }
     #[test]
     fn every_listed_colour_has_retail_defaults() {

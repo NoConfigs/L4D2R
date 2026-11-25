@@ -495,7 +495,9 @@ pub(crate) fn model_ambient(
         lit.push((color, direction, light.origin));
     }
     let origin = position.to_array();
-    let visible: Vec<bool> = if lit.len() > 16 && !IN_LIGHT_POOL.with(|f| f.get()) {
+    // Few lights can still be slow: c2m2's reveal had one sample whose
+    // handful of long traces took ~28 ms serially, so split from 3 up.
+    let visible: Vec<bool> = if lit.len() > 2 && !IN_LIGHT_POOL.with(|f| f.get()) {
         let pool = bevy::tasks::ComputeTaskPool::get();
         let chunk = lit.len().div_ceil(pool.thread_num().max(1));
         pool.scope(|scope| {
@@ -616,8 +618,27 @@ fn update_model_lighting(
     {
         let mut missing: Vec<([i32; 3], Vec3)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for (_, mesh, transform, layers, _, state, bounds, gpu, _, _) in draws.iter() {
+        for (entity, mesh, transform, layers, _, state, bounds, gpu, animated, parent) in draws.iter() {
+            // Resampled in place by the loop below (a changed appearance, or
+            // a slot lost to a table reset): those draws keep their position,
+            // so skipping them here left ~2,000 cells of c2m2's reveal to
+            // serial sampling (36-46 ms) after a full cache was cleared.
+            let appearance = animated.and_then(|draw| appearances.get(draw.root).ok())
+                .or_else(|| parent.and_then(|parent| appearances.get(parent.parent()).ok())).copied();
+            let resample = state.appearance != appearance
+                || (!legacy && state.slot.is_some() && table.owner(entity) != state.slot);
+            // The view model samples at the camera, as the loop below does;
+            // left out, its cell (often many lights through windows) was
+            // sampled serially after the batch (36 ms at c2m2's reveal).
             if layers.is_some_and(|l| l.intersects(&RenderLayers::layer(2))) {
+                let Some(position) = cameras.iter().next().map(|c| c.translation()) else { continue };
+                if !resample && state.sample_position.is_some_and(|p| p.distance_squared(position) < 0.09) {
+                    continue;
+                }
+                let cell = position.to_array().map(|v| (v / 0.5).floor() as i32);
+                if !cache.contains_key(&cell) && seen.insert(cell) {
+                    missing.push((cell, position));
+                }
                 continue;
             }
             let center = if gpu.is_some() {
@@ -642,7 +663,7 @@ fn update_model_lighting(
                 (lo + hi) * 0.5
             };
             let position = transform.transform_point(center) + Vec3::Y * 0.04;
-            if state.sample_position.is_some_and(|p| p.distance_squared(position) < 0.09) {
+            if !resample && state.sample_position.is_some_and(|p| p.distance_squared(position) < 0.09) {
                 continue;
             }
             let cell = position.to_array().map(|v| (v / 0.5).floor() as i32);
