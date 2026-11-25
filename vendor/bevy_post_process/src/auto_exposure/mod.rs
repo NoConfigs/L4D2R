@@ -217,7 +217,7 @@ fn auto_exposure(
     ) {
         if let Some(target) = readback_buffers.get(handle) {
             ctx.command_encoder()
-                .copy_buffer_to_buffer(state, 0, &target.buffer, 0, 4);
+                .copy_buffer_to_buffer(state, 0, &target.buffer, 0, 16);
         }
     }
 

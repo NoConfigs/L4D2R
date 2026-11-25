@@ -2810,7 +2810,12 @@ fn setup(
         // on it alone.
         RenderLayers::from_layers(&[0, 1, crate::model_shadows::LAYER]),
     ));
-    if !water_handles.is_empty() || std::env::args().any(|a| a == "--capture-depth-prepass") {
+    // The depth prepass also feeds SpriteCard $DEPTHBLEND (soft particles),
+    // which retail applies on every map: without it c1m1's inferno_wall
+    // flames cut off in hard lines against the floor and debris (25 Nov).
+    // Phones skip it unless the map has water, for memory and fill rate.
+    let mobile = cfg!(any(target_os = "ios", target_os = "android"));
+    if !water_handles.is_empty() || !mobile || std::env::args().any(|a| a == "--capture-depth-prepass") {
         camera.insert(bevy::core_pipeline::prepass::DepthPrepass);
     }
     if let Some(image) = sky_handle {

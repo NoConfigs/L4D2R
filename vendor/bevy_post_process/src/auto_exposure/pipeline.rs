@@ -64,7 +64,7 @@ pub fn init_auto_exposure_pipeline(mut commands: Commands, asset_server: Res<Ass
                     texture_1d(TextureSampleType::Float { filterable: false }),
                     uniform_buffer::<AutoExposureCompensationCurveUniform>(false),
                     storage_buffer_sized(false, NonZero::<u64>::new(HISTOGRAM_BIN_COUNT * 4)),
-                    storage_buffer_sized(false, NonZero::<u64>::new(4)),
+                    storage_buffer_sized(false, NonZero::<u64>::new(16)),
                     storage_buffer::<ViewUniform>(true),
                 ),
             ),

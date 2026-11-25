@@ -57,14 +57,17 @@ pub struct ParticlePull {
     /// SpriteCard $MOD2X: the sprite multiplies the scene by twice its
     /// colour (mid-grey leaves it unchanged), e.g. fire glows.
     pub mod2x: bool,
+    /// SpriteCard $ignorez: no depth test.
+    pub ignorez: bool,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ParticlePullKey {
     mod2x: bool,
+    ignorez: bool,
 }
 impl From<&ParticlePull> for ParticlePullKey {
     fn from(value: &ParticlePull) -> Self {
-        Self { mod2x: value.mod2x }
+        Self { mod2x: value.mod2x, ignorez: value.ignorez }
     }
 }
 impl MaterialExtension for ParticlePull {
@@ -78,6 +81,9 @@ impl MaterialExtension for ParticlePull {
         // not a solid surface. Sprite particles likewise never write depth.
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
             depth.depth_write_enabled = Some(false);
+            if key.bind_group_data.ignorez {
+                depth.depth_compare = Some(bevy::render::render_resource::CompareFunction::Always);
+            }
         }
         // Keep scene-copy scheduling in the transmissive phase, but composite
         // the sampled colour using the sprite mask. Opaque compositing erases

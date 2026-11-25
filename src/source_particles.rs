@@ -179,7 +179,20 @@ struct Definition {
     alpha: [f32; 2],
     color: [Vec3; 2],
     distance: f32,
+    /// Position Within Sphere Random distance_min (units).
+    distance_min: f32,
     bias: Vec3,
+    /// distance_bias_absolute_value: 1 per axis that is mirrored positive.
+    bias_abs: Vec3,
+    /// Position Within Sphere Random "bias in local system": the offset is
+    /// in the control point's frame.
+    sphere_local: bool,
+    /// "Remap CP Speed to CP": (input cp, input range in units/s, output cp,
+    /// output range). The output control point's x is that remapped speed.
+    cp_speed: Option<(usize, [f32; 2], usize, [f32; 2])>,
+    /// Initializer "Remap Control Point to Scalar" onto alpha (field 7) as a
+    /// scalar of the initial value: (cp, input range, output range).
+    alpha_from_cp: Option<(usize, [f32; 2], [f32; 2])>,
     /// Position Within Sphere Random's control point: (control_point_number,
     /// "randomly distribute to highest supplied Control Point", "randomly
     /// distribution growth time").
@@ -407,7 +420,12 @@ fn definition(elements: &[Element], index: usize) -> Option<Definition> {
         alpha: [constant_color[3]; 2],
         color: [Vec3::new(constant_color[0], constant_color[1], constant_color[2]); 2],
         distance: 0.,
+        distance_min: 0.,
         bias: Vec3::ONE,
+        bias_abs: Vec3::ZERO,
+        sphere_local: false,
+        cp_speed: None,
+        alpha_from_cp: None,
         sphere_points: None,
         velocity: [Vec3::ZERO; 2],
         gravity: Vec3::ZERO,
@@ -569,6 +587,25 @@ fn definition(elements: &[Element], index: usize) -> Option<Definition> {
                 }
                 "lifetime random" => d.life = pair("lifetime_min", "lifetime_max", 1.),
                 "alpha random" => d.alpha = pair("alpha_min", "alpha_max", 255.),
+                "remap cp speed to cp" => {
+                    d.cp_speed = Some((
+                        o.number("input control point", 0.).max(0.) as usize,
+                        [o.number("input minimum", 0.), o.number("input maximum", 1.)],
+                        o.number("output control point", 0.).max(0.) as usize,
+                        [o.number("output minimum", 0.), o.number("output maximum", 1.)],
+                    ));
+                }
+                "remap control point to scalar"
+                    if o.number("output field", 3.) == 7. && o.boolean("output is scalar of initial random range") =>
+                {
+                    // smoke_precipitation_screen: alpha x1.5 standing still,
+                    // x0.75 at full speed (CP5 = the eye's speed / 300).
+                    d.alpha_from_cp = Some((
+                        o.number("input control point number", 0.).max(0.) as usize,
+                        [o.number("input minimum", 0.), o.number("input maximum", 1.)],
+                        [o.number("output minimum", 0.), o.number("output maximum", 1.)],
+                    ));
+                }
                 "color random" => {
                     d.color = [vector("color1", [255.; 3]), vector("color2", [255.; 3])];
                     let tint = o.number("tint_perc", 0.).clamp(0., 1.);
@@ -583,7 +620,10 @@ fn definition(elements: &[Element], index: usize) -> Option<Definition> {
                 }
                 "position within sphere random" => {
                     d.distance = o.number("distance_max", 0.);
+                    d.distance_min = o.number("distance_min", 0.).clamp(0., d.distance.max(0.));
                     d.bias = vector("distance_bias", [1.; 3]);
+                    d.bias_abs = vector("distance_bias_absolute_value", [0.; 3]);
+                    d.sphere_local = o.boolean("bias in local system");
                     d.sphere_points = Some((
                         o.number("control_point_number", 0.).max(0.) as usize,
                         o.boolean("randomly distribute to highest supplied Control Point"),
@@ -829,6 +869,12 @@ fn definition(elements: &[Element], index: usize) -> Option<Definition> {
     }
     d.trail = d.renderers.iter().map(|r| r.trail).fold(0., f32::max);
     d.rope = d.renderers.iter().any(|r| r.rope);
+    // "screen space effect" (e.g. smoke_precipitation_screen): the particles
+    // live in the system's own frame and stay fixed on screen as the view
+    // turns; ride the owner's full transform each step.
+    if node.boolean("screen space effect") && d.control_lock.is_none() {
+        d.control_lock = Some((true, 0.));
+    }
     // Keep simulation-only/unsupported-renderer parents alive for their
     // children, without silently substituting billboard draws.
     Some(d)
@@ -920,6 +966,8 @@ struct Batch {
     parent: Option<usize>,
     parent_cursor: usize,
     previous_control: Option<l4d2r_math::Mat4>,
+    /// Remap CP Speed to CP: last input point (m) and the remapped value.
+    cp_speed: (Option<Vec3>, f32),
     owner: usize,
     controls: Vec<usize>,
     /// Next slot of a sequential path initializer.
@@ -1174,6 +1222,7 @@ pub fn setup(
                     parent,
                     parent_cursor: 0,
                     previous_control: None,
+                    cp_speed: (None, 0.),
                     owner: id,
                     controls: controls.clone(),
                     path_sequence: 0,
@@ -1315,6 +1364,13 @@ pub fn setup(
                         },
                         extension: crate::particle_pull::ParticlePull {
                             mod2x: crate::material::particle_mod2x(&mut assets, &d.material).unwrap_or(false),
+                            // $ignorez only for blended sprites (c13m4's vistasmoke
+                            // veil). Additive "_noz" glows rely on Source's pixel
+                            // visibility queries to hide behind walls, which are
+                            // not modelled; ignoring depth showed fire glows and
+                            // lamp halos through c1m1's walls (25 Nov report).
+                            ignorez: material.alpha != 3 && add_self == 0.
+                                && crate::material::particle_ignorez(&mut assets, &d.material).unwrap_or(false),
                             depth_blend: crate::material::particle_depth_blend(&mut assets, &d.material).unwrap_or(0.),
                             sky_fog: Vec4::ZERO,
                             refract_base_on: f32::from(refract_base.is_some()),
@@ -1434,6 +1490,7 @@ pub fn setup(
                 parent,
                 parent_cursor: 0,
                 previous_control: None,
+                cp_speed: (None, 0.),
                 owner: id,
                 controls: controls.clone(),
                 path_sequence: 0,
@@ -1769,6 +1826,8 @@ pub fn update(
                 let faded = |p: &Particle| batch.definition.color_fade.map_or(p.color, |(target, window, _)| p.color.lerp(target, remap(p.age / p.life, window, [0., 1.])));
                 let color = batch.particles.iter().map(|p| faded(p)).sum::<Vec3>() / n * 255.;
                 println!("L4D2RPFX color={:.0} {:.0} {:.0}", color.x, color.y, color.z);
+                let mean = batch.particles.iter().map(|p| p.position).sum::<Vec3>() / n / 0.0254;
+                println!("L4D2RPFX mean source pos {:.0} {:.0} {:.0}", mean.x, -mean.z, mean.y);
                 println!("L4D2RPFX t={:.1} {} {} {} n={} life={:.2} radius={:.1} age={:.2} span={:.0}u alpha={:.2}",
                     logic.world.time, owner.me.targetname, owner.me.kv("effect_name").unwrap_or(""), batch.definition.material, batch.particles.len(),
                     batch.particles.iter().map(|p| p.life).sum::<f32>() / n,
@@ -2020,6 +2079,14 @@ pub fn update(
             } else {
                 0.
             };
+            if let Some((cp, input, _, output)) = d.cp_speed {
+                let id = if cp == 0 { Some(batch.owner) } else { batch.controls.get(cp - 1).copied() };
+                if let Some(id) = id {
+                    let at = point(&logic, id);
+                    let speed = batch.cp_speed.0.map_or(0., |prev| prev.distance(at) / dt.max(1e-4) / 0.0254);
+                    batch.cp_speed = (Some(at), remap(speed, input, output));
+                }
+            }
             for particle_index in 0..count {
                 let rng = &mut effects.rng;
                 let highest = batch.controls.len();
@@ -2044,14 +2111,38 @@ pub fn update(
                 } else {
                     point(&logic, batch.controls[cp - 1])
                 };
-                let mut offset = Vec3::new(
-                    between(rng, [-1., 1.]),
-                    between(rng, [-1., 1.]),
-                    between(rng, [-1., 1.]),
-                )
-                .normalize_or_zero()
-                    * between(rng, [0., d.distance])
-                    * d.bias;
+                // Source CreateWithinSphere: a random point in the unit
+                // sphere; its direction is mirrored (absolute value axes),
+                // biased and renormalised, and its length lerps distance_min
+                // to distance_max. The bias shapes the direction only:
+                // c13m4's smoke_precipitation (200-300, bias 1 1 .5, abs z)
+                // spawned 0-300 units out, ~141 on average, and size-faded
+                // away entirely.
+                let mut unit = Vec3::ZERO;
+                for _ in 0..16 {
+                    unit = Vec3::new(between(rng, [-1., 1.]), between(rng, [-1., 1.]), between(rng, [-1., 1.]));
+                    if unit.length_squared() <= 1. {
+                        break;
+                    }
+                }
+                let length = unit.length().min(1.);
+                let mut direction = unit;
+                for axis in 0..3 {
+                    if d.bias_abs[axis] != 0. {
+                        direction[axis] = direction[axis].abs();
+                    }
+                }
+                let mut offset = (direction * d.bias).normalize_or_zero()
+                    * (d.distance_min + (d.distance - d.distance_min) * length);
+                if d.sphere_local {
+                    let id = if cp == 0 { Some(batch.owner) } else { batch.controls.get(cp - 1).copied() };
+                    if let Some(id) = id {
+                        let m = logic.world.world_matrix(id);
+                        offset = Vec3::from_array(
+                            m.transform_vector3(l4d2r_math::Vec3::from_array(offset.to_array())).to_array(),
+                        );
+                    }
+                }
                 if let Some(warp) = d.warp {
                     let scale = warp[0].lerp(warp[1], between(rng, [0., 1.]));
                     let matrix = logic.world.world_matrix(batch.owner);
@@ -2135,6 +2226,13 @@ pub fn update(
                     radius = remap(center.distance(origin) / 0.0254, input, output);
                 }
                 let mut alpha = between(rng, d.alpha) / 255.;
+                if let Some((cp, input, output)) = d.alpha_from_cp {
+                    let value = match d.cp_speed {
+                        Some((_, _, out_cp, _)) if out_cp == cp => batch.cp_speed.1,
+                        _ => 0.,
+                    };
+                    alpha *= remap(value, input, output);
+                }
                 if let Some((input, output, scale)) = d.radius_alpha {
                     let value = remap(radius, input, output);
                     alpha = if scale { alpha * value } else { value };
@@ -2716,12 +2814,13 @@ pub fn update(
                     )
                 } else {
                     // SpriteCard $MINSIZE/$MAXSIZE/$STARTFADESIZE/
-                    // $ENDFADESIZE against the view depth (clip w), not the
-                    // straight distance: c13m4's smoke_precipitation
-                    // (vistasmokev5_nearcull, fade .35-.55) spawns 200-300
-                    // units around the eye and must vanish up close; without
-                    // it the near smoke hazed the whole view.
-                    let depth = (p.position - camera.translation).dot(camera.rotation * Vec3::NEG_Z).max(0.01);
+                    // $ENDFADESIZE against the straight eye distance: retail's
+                    // spritecard_vs20 (static combo 0, disassembled 25 Nov)
+                    // takes rsq(dot(pos - eye, pos - eye)), not clip w. With
+                    // view depth, c13m4's smoke_precipitation (spawned 200-300
+                    // units around and mostly above the eye) faded out entirely
+                    // when looking level, and the sky lost retail's grey haze.
+                    let depth = p.position.distance(camera.translation).max(0.01);
                     sprite_extent(live_radius(d, p, origin).unwrap_or(p.radius * scale), depth, batch.sizes)
                 };
                 let (base_right, base_up) = if matches!(renderer.orientation, 2 | 3) {

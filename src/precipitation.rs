@@ -64,6 +64,16 @@ fn runtime(logic: &mut crate::l4d2r_cinematic::MapLogic, classname: &str, name: 
 }
 
 pub fn setup(mut commands: Commands, mut logic: ResMut<crate::l4d2r_cinematic::MapLogic>) {
+    let list = build(&mut logic);
+    if !list.is_empty() {
+        println!("Precipitation: {} volume(s)", list.len());
+    }
+    commands.insert_resource(Volumes { list });
+}
+
+/// The (volume, emitter) pairs for the current map logic, adding the runtime
+/// emitters and control points if they are missing.
+fn build(logic: &mut crate::l4d2r_cinematic::MapLogic) -> Vec<(usize, usize)> {
     let volumes: Vec<(usize, u32)> = logic
         .world
         .ents
@@ -75,31 +85,48 @@ pub fn setup(mut commands: Commands, mut logic: ResMut<crate::l4d2r_cinematic::M
         .collect();
     let mut list = vec![];
     if !volumes.is_empty() {
-        runtime(&mut logic, "info_particle_target", CONTROL, vec![], Kind::None);
-        runtime(&mut logic, "info_particle_target", AHEAD, vec![], Kind::None);
+        runtime(logic, "info_particle_target", CONTROL, vec![], Kind::None);
+        runtime(logic, "info_particle_target", AHEAD, vec![], Kind::None);
     }
     for (volume, kind) in volumes {
         let fx = effect(kind).unwrap();
-        let keys = (1..=5)
-            .map(|i| (format!("cpoint{i}"), if i == 1 { AHEAD } else { CONTROL }.to_string()))
-            .chain([("effect_name".into(), fx.to_string())])
-            .collect();
-        let emitter = runtime(&mut logic, "info_particle_system", &format!("{PREFIX}{fx}"), keys, Kind::Particle { active: false, started: 0. });
-        list.push((volume, emitter));
+        // client.dll names an outer system for every type and a screen-space
+        // one for smoke and rain_storm (smoke_precipitation_screen is the
+        // grey veil over c13m4's whole view in retail).
+        let mut systems = vec![fx.to_string(), format!("{fx}_outer")];
+        if matches!(kind, 6 | 8) {
+            systems.push(format!("{fx}_screen"));
+        }
+        for name in systems {
+            let keys = (1..=5)
+                .map(|i| (format!("cpoint{i}"), if i == 1 { AHEAD } else { CONTROL }.to_string()))
+                .chain([("effect_name".into(), name.clone())])
+                .collect();
+            let emitter = runtime(logic, "info_particle_system", &format!("{PREFIX}{name}"), keys, Kind::Particle { active: false, started: 0. });
+            list.push((volume, emitter));
+        }
     }
-    if !list.is_empty() {
-        println!("Precipitation: {} volume(s)", list.len());
-    }
-    commands.insert_resource(Volumes { list });
+    list
 }
 
 pub fn update(
-    volumes: Option<Res<Volumes>>,
+    volumes: Option<ResMut<Volumes>>,
     mut logic: ResMut<crate::l4d2r_cinematic::MapLogic>,
     camera: Query<&GlobalTransform, With<crate::viewer::GameCamera>>,
 ) {
     let forward = camera.iter().next().map(|c| c.forward().as_vec3()).unwrap_or(Vec3::NEG_Z);
-    let Some(volumes) = volumes else { return };
+    let Some(mut volumes) = volumes else { return };
+    // Restarting the chapter rebuilds the map logic without the runtime
+    // emitters, leaving stale indices (c1m1 "Restart Campaign" panicked
+    // here: index 2045 of 2041). Rebuild when any pair no longer points at
+    // a precipitation volume and one of our emitters.
+    let stale = volumes.list.iter().any(|&(volume, emitter)| {
+        logic.world.ents.get(volume).is_none_or(|e| e.me.classname != "func_precipitation")
+            || logic.world.ents.get(emitter).is_none_or(|e| !e.me.targetname.starts_with(PREFIX))
+    });
+    if stale {
+        volumes.list = build(&mut logic);
+    }
     if volumes.list.is_empty() {
         return;
     }
@@ -130,6 +157,13 @@ pub fn update(
     for (emitter, amount) in density {
         let e = &mut logic.world.ents[emitter];
         e.me.origin = source;
+        // The view's angles, for the screen-space system's own frame.
+        let f = l4d2r_math::Vec3::new(forward.x, -forward.z, forward.y);
+        e.me.angles = l4d2r_math::Vec3::new(
+            -f.z.clamp(-1., 1.).asin().to_degrees(),
+            f.y.atan2(f.x).to_degrees(),
+            0.,
+        );
         e.me.ent.0.retain(|(k, _)| k != "precip_density");
         e.me.ent.0.push(("precip_density".into(), amount.to_string()));
         let on = amount > 0.;

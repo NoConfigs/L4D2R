@@ -2996,7 +2996,13 @@ pub(crate) fn pickup_aim_score(eye: Vec3, forward: Vec3, origin: Vec3) -> Option
     let delta = origin + Vec3::Y * 0.12 - eye;
     let distance = delta.length();
     let aim = forward.dot(delta.normalize_or_zero());
-    (distance < 2.2 && aim > 0.45).then_some(aim - distance * 0.025)
+    // Retail cvars (live, 25 Nov): player_use_radius 96 units and
+    // z_use_tolerance 0.82. The old 0.45 cone (~63 degrees) focused a
+    // c3m1 medkit far off the crosshair: prompt, outline and the
+    // item-reach hand where retail shows none.
+    const USE_RADIUS: f32 = 96. * 0.0254;
+    const USE_TOLERANCE: f32 = 0.82;
+    (distance < USE_RADIUS && aim >= USE_TOLERANCE).then_some(aim - distance * 0.025)
 }
 fn interact(
     mut commands: Commands,

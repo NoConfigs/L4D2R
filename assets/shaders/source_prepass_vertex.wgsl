@@ -164,12 +164,17 @@ fn vertex(vertex_no_morph: Vertex
     // pass, but a depth-only prepass runs no fragment stage for opaque
     // materials, so it wrote that geometry's depth and hid the 3D skybox
     // behind it (c4m2: blue tree and horizon silhouettes). Vertices past
-    // farz go to the far plane (reverse Z: 0) instead.
+    // farz go behind the far plane (z = -w) so the rasteriser clips them:
+    // a triangle straddling farz is cut where its depth crosses the plane
+    // instead of being stretched to depth 0, which still wrote depth over
+    // the sky in slivers (c4m2: pixels by the chimneys and in the tree).
+    // The cut lands nearer than farz, so the prepass writes slightly less;
+    // the main pass still writes the visible part's depth.
     {
         let far_clip = lighting_table[4095u].cube[2];
         if source_uniform.settings.z < 0.5 && far_clip.x > 0.0
             && length(out.world_position.xyz - view.world_position.xyz) > far_clip.x {
-            out.position.z = 0.0;
+            out.position.z = -out.position.w;
         }
     }
 #endif

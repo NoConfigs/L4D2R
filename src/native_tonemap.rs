@@ -232,7 +232,7 @@ pub(crate) fn install_exposure_readback(
     mut buffers: ResMut<Assets<bevy::render::storage::ShaderBuffer>>,
 ) {
     let handle = buffers.add(bevy::render::storage::ShaderBuffer::new(
-        &0f32.to_le_bytes(),
+        &[0u8; 16],
         RenderAssetUsages::RENDER_WORLD,
     ));
     commands.insert_resource(ExposureReadback(handle.clone()));
@@ -245,7 +245,8 @@ pub(crate) fn install_exposure_readback(
                     // L4D2R_EV_LOG: debug, the adapted EV about once a second.
                     static LOGS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                     if std::env::var_os("L4D2R_EV_LOG").is_some() && LOGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 60 == 0 {
-                        println!("L4D2R EV {ev:.3} scale {:.3}", ev.exp2() * CAMERA_EXPOSURE);
+                        let f = |i: usize| event.data.get(i * 4..i * 4 + 4).map_or(f32::NAN, |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+                        println!("L4D2R EV {ev:.3} scale {:.3} metered avg_log {:.3} median_log {:.3} target {:.3}", ev.exp2() * CAMERA_EXPOSURE, f(1), f(2), f(3));
                     }
                     EXPOSURE_EV.store(ev.to_bits(), std::sync::atomic::Ordering::Relaxed);
                 }

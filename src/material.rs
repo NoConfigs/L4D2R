@@ -553,6 +553,12 @@ pub fn particle_depth_blend(assets: &mut SourceAssets, material: &str) -> io::Re
     Ok(scale * 0.0254)
 }
 /// SpriteCard `$mod2x 1`: a 2x modulate blend.
+/// SpriteCard `$ignorez`: drawn without the depth test (c13m4's
+/// vistasmokev5 smoke shows through the rocks in retail).
+pub fn particle_ignorez(assets: &mut SourceAssets, material: &str) -> io::Result<bool> {
+    let (shader, values) = values(assets, &material_path(material), 0)?;
+    Ok(shader.eq_ignore_ascii_case("spritecard") && values.get("$ignorez").is_some_and(|value| value == "1"))
+}
 pub fn particle_mod2x(assets: &mut SourceAssets, material: &str) -> io::Result<bool> {
     let (shader, values) = values(assets, &material_path(material), 0)?;
     Ok(shader.eq_ignore_ascii_case("spritecard") && values.get("$mod2x").is_some_and(|value| value == "1"))

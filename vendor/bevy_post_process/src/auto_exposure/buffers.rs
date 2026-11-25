@@ -15,7 +15,7 @@ pub(super) struct AutoExposureBuffers {
 }
 
 pub(super) struct AutoExposureBuffer {
-    pub(super) state: StorageBuffer<f32>,
+    pub(super) state: StorageBuffer<bevy_math::Vec4>,
     pub(super) settings: UniformBuffer<AutoExposureUniform>,
 }
 
@@ -75,7 +75,7 @@ pub(super) fn prepare_buffers(
                 let value = entry.insert(AutoExposureBuffer {
                     state: {
                         // L4D2 rewrite patch: readable for the exposure copy.
-                        let mut state = StorageBuffer::from(initial_state);
+                        let mut state = StorageBuffer::from(bevy_math::Vec4::new(initial_state, 0., 0., 0.));
                         state.add_usages(bevy_render::render_resource::BufferUsages::COPY_SRC);
                         state
                     },

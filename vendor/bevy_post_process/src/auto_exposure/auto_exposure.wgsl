@@ -57,7 +57,9 @@ struct CompensationCurve {
 
 @group(0) @binding(6) var<storage, read_write> histogram: array<atomic<u32>, 64>;
 
-@group(0) @binding(7) var<storage, read_write> exposure: f32;
+// L4D2 rewrite patch: x is the adapted exposure; y the metered average log
+// luminance, z the metered median (debug readback).
+@group(0) @binding(7) var<storage, read_write> exposure_state: vec4<f32>;
 
 @group(0) @binding(8) var<storage, read_write> view: View;
 
@@ -180,6 +182,7 @@ fn compute_average(@builtin(local_invocation_index) local_index: u32) {
     // L4D2 rewrite patch: Source's minimum average luminance (client
     // 101c6560): the scale is raised so the median metered luminance reaches
     // min_average_luminance, never past the map's maximum exposure.
+    var debug_median = 0.0;
     if settings.min_average_luminance > 0.0 && histogram_sum > 0u {
         let half = f32(histogram_sum) * 0.5;
         var median = settings.min_log_lum;
@@ -193,11 +196,13 @@ fn compute_average(@builtin(local_invocation_index) local_index: u32) {
                 break;
             }
         }
+        debug_median = median;
         let floor_ev = min(log2(settings.min_average_luminance) - median, settings.max_ev);
         target_exposure = max(target_exposure, floor_ev);
     }
 
     // Smoothly adjust the `exposure` towards the `target_exposure`
+    var exposure = exposure_state.x;
     let delta = target_exposure - exposure;
     if target_exposure > exposure {
         let speed_down = settings.speed_down * globals.delta_time;
@@ -211,5 +216,6 @@ fn compute_average(@builtin(local_invocation_index) local_index: u32) {
 
     // Apply the exposure to the color grading settings, from where it will be used for the color
     // grading pass.
+    exposure_state = vec4<f32>(exposure, avg_lum, debug_median, target_exposure);
     view.color_grading.exposure += exposure;
 }
