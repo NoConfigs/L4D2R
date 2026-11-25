@@ -23,7 +23,7 @@ use bevy::ui::RelativeCursorPosition;
 use bevy::window::PrimaryWindow;
 
 const UNIT: f32 = 0.0254;
-const ROWS: usize = 22;
+const ROWS: usize = 18;
 const PREVIEW_LAYER: usize = 9;
 
 const PANEL: Color = Color::srgba(0.07, 0.08, 0.09, 0.92);
@@ -118,6 +118,8 @@ struct UiState {
     preview_image: Option<Handle<Image>>,
     preview_pivot: Option<Entity>,
     hovered_model: Option<String>,
+    /// The editor hid the game HUD (restored when editing ends).
+    hud_hidden: bool,
 }
 
 #[derive(Component)]
@@ -182,7 +184,7 @@ enum Act {
 pub fn install(app: &mut App) {
     app.init_resource::<UiState>().add_systems(
         Update,
-        (setup, show, buttons, browser, properties, fields, world, draw, ghost, preview)
+        (setup, show, fps_below_toolbar, buttons, browser, properties, fields, world, draw, ghost, preview)
             .chain()
             .after(crate::game_menu::update),
     );
@@ -246,10 +248,12 @@ fn field(commands: &mut Commands, parent: Entity, f: Field, value: &str, width: 
             ChildOf(parent),
         ))
         .id();
+    let (shown, color) = if value.is_empty() { ("(click to type)", DIM) } else { (value, TEXT) };
     commands.spawn((
-        Text::new(value),
+        Text::new(shown),
         TextFont { font_size: FontSize::Px(12.), ..default() },
-        TextColor(TEXT),
+        TextLayout::default().with_no_wrap(),
+        TextColor(color),
         FieldText(f),
         ChildOf(b),
     ));
@@ -302,23 +306,25 @@ fn setup(mut commands: Commands, roots: Query<(), With<EditRoot>>, camera: Query
     commands.entity(mode).insert(ModeText);
     button(&mut commands, bar, "Save (F6)", Act::Save, 84.);
     button(&mut commands, bar, "Load (F7)", Act::Load, 84.);
-    text(&mut commands, bar, "  Studs", 13., DIM);
+    let studs = text(&mut commands, bar, "Studs", 13., DIM);
+    commands.entity(studs).insert(Node { margin: UiRect::new(px(22.), px(10.), px(0.), px(0.)), ..default() });
     button(&mut commands, bar, "-", Act::GridDown, 24.);
     let grid = text(&mut commands, bar, "8", 13., TEXT);
-    commands.entity(grid).insert(GridText);
+    commands.entity(grid).insert((GridText, Node { margin: UiRect::horizontal(px(8.)), ..default() }));
     button(&mut commands, bar, "+", Act::GridUp, 24.);
-    text(&mut commands, bar, "  Tool", 13., DIM);
+    let tool = text(&mut commands, bar, "Tool", 13., DIM);
+    commands.entity(tool).insert(Node { margin: UiRect::new(px(22.), px(10.), px(0.), px(0.)), ..default() });
     let m = button(&mut commands, bar, "Move", Act::ToolMove, 60.);
     commands.entity(m).insert(Toggle(Act::ToolMove));
     let r = button(&mut commands, bar, "Resize", Act::ToolResize, 60.);
     commands.entity(r).insert(Toggle(Act::ToolResize));
-    button(&mut commands, bar, "Rotate -15", Act::RotateLeft, 82.);
-    button(&mut commands, bar, "Rotate +15", Act::RotateRight, 82.);
-    button(&mut commands, bar, "Duplicate", Act::Duplicate, 78.);
+    button(&mut commands, bar, "Rotate -15", Act::RotateLeft, 96.);
+    button(&mut commands, bar, "Rotate +15", Act::RotateRight, 96.);
+    button(&mut commands, bar, "Duplicate", Act::Duplicate, 88.);
     button(&mut commands, bar, "Delete", Act::Delete, 62.);
-    button(&mut commands, bar, "Stop placing", Act::StopPlacing, 92.);
+    button(&mut commands, bar, "Stop placing", Act::StopPlacing, 104.);
     let status = text(&mut commands, bar, "", 13., DIM);
-    commands.entity(status).insert(StatusText);
+    commands.entity(status).insert((StatusText, Node { margin: UiRect::left(px(14.)), ..default() }));
     // Browser.
     let browser = commands
         .spawn((
@@ -380,10 +386,38 @@ fn setup(mut commands: Commands, roots: Query<(), With<EditRoot>>, camera: Query
     commands.spawn((PropsBody, Node { flex_direction: FlexDirection::Column, ..default() }, ChildOf(props)));
 }
 
+/// The FPS counter sits top right, where the toolbar's status text is: drop
+/// it below the toolbar while editing.
+/// Also hides the first-person gun and arms (layer 2 on the view-model
+/// camera, which keeps drawing the UI) while editing, like Hammer / Studio.
+fn fps_below_toolbar(
+    editor: Res<Editor>,
+    mut fps: Query<&mut Node, With<crate::performance::FpsOverlay>>,
+    mut view: Query<&mut bevy::camera::visibility::RenderLayers, With<crate::game::ViewCamera>>,
+) {
+    let editing = editor.opened && editor.editing;
+    let top = if editing { px(40.) } else { px(8.) };
+    for mut node in &mut fps {
+        if node.top != top {
+            node.top = top;
+        }
+    }
+    let layers = if editing {
+        bevy::camera::visibility::RenderLayers::none()
+    } else {
+        bevy::camera::visibility::RenderLayers::layer(2)
+    };
+    for mut l in &mut view {
+        if *l != layers {
+            *l = layers.clone();
+        }
+    }
+}
+
 #[allow(clippy::type_complexity)]
 fn show(
     editor: Res<Editor>,
-    ui: Res<UiState>,
+    mut ui: ResMut<UiState>,
     frontend: Res<crate::game_menu::Frontend>,
     console: Res<crate::game_console::Console>,
     mut roots: Query<&mut Node, (With<EditRoot>, Without<PropsPanel>)>,
@@ -393,8 +427,23 @@ fn show(
     mut toggles: Query<(&Toggle, &Interaction, &mut BackgroundColor), Without<FieldBtn>>,
     mut mode: Query<&Children, With<ModeText>>,
     mut texts: Query<&mut Text, (Without<StatusText>, Without<GridText>)>,
+    mut hud: Query<&mut Node, (With<crate::game_ui::HudRoot>, Without<EditRoot>, Without<PropsPanel>)>,
 ) {
     let visible = editor.opened && editor.editing && frontend.page == crate::game_menu::Page::Game && !console.open;
+    if visible {
+        // Like Hammer / Roblox Studio: no game HUD while editing.
+        for mut node in &mut hud {
+            if node.display != Display::None {
+                node.display = Display::None;
+            }
+        }
+        ui.hud_hidden = true;
+    } else if ui.hud_hidden && frontend.page == crate::game_menu::Page::Game {
+        for mut node in &mut hud {
+            node.display = Display::Flex;
+        }
+        ui.hud_hidden = false;
+    }
     for mut node in &mut roots {
         let d = if visible { Display::Flex } else { Display::None };
         if node.display != d {
@@ -692,7 +741,13 @@ fn browser(
                         ChildOf(parent),
                     ))
                     .id();
-                commands.spawn((Text::new(label.clone()), TextFont { font_size: FontSize::Px(12.), ..default() }, TextColor(TEXT), ChildOf(b)));
+                commands.spawn((
+                    Text::new(label.clone()),
+                    TextFont { font_size: FontSize::Px(12.), ..default() },
+                    TextLayout::default().with_no_wrap(),
+                    TextColor(TEXT),
+                    ChildOf(b),
+                ));
             }
             if list.len() > ROWS {
                 let more = commands

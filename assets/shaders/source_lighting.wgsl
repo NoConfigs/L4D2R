@@ -403,6 +403,7 @@ fn fragment(in: SourceVertexOutput, @builtin(front_facing) is_front: bool) -> Fr
 #endif
     // Bounded dynamic lights: the flashlight and infected foot light.
     // Native world lights remain baked. Do not assume the spotlight is slot zero.
+    let baked_lighting = lighting;
     if source_uniform.settings.w < 0.5 && source_uniform.settings.z < 0.5 {
 #if AVAILABLE_STORAGE_BUFFER_BINDINGS >= 3
         let light_count = min(2u,arrayLength(&clustered_lights.data));
@@ -424,10 +425,12 @@ fn fragment(in: SourceVertexOutput, @builtin(front_facing) is_front: bool) -> Fr
             }
             // Source's flashlight attenuates linearly (r_flashlightconstant 0,
             // r_flashlightlinear 100, r_flashlightquadratic 0): 1/d, not 1/d^2.
-            // Scaled to equal the old inverse-square value at 2 m, where the
-            // brightness was matched; the c2m1 guardrail ~5 m out was too
-            // dark against retail with 1/d^2.
-            let falloff=pow(max(0.0,1.0-distance2*torch.color_inverse_square_range.w),2.0)/(sqrt(distance2)*2.0);
+            // Scale from matched live retail shots (25 Nov, linear light added
+            // by the beam, flashlight on minus off): c1m2 store floor at ~3 m
+            // (setpos -6960 -2400 392, setang 30 108 0) and c2m1 road/guardrail
+            // at 4-7 m (setpos 10728 7836 -545, setang 10 -40) both land
+            // within ~10% of retail; the old /2.0 was about 3x too bright.
+            let falloff=pow(max(0.0,1.0-distance2*torch.color_inverse_square_range.w),2.0)/(sqrt(distance2)*6.0);
 #ifdef SOURCE_CAP_PHONG
             lighting+=torch.color_inverse_square_range.rgb*0.3*cone*cone*falloff*shadow*cap_light(dot(input.N,-normalize(delta)));
 #ifdef VERTEX_UVS_A
@@ -463,6 +466,7 @@ fn fragment(in: SourceVertexOutput, @builtin(front_facing) is_front: bool) -> Fr
         }
         }
     }
+    let torch_light = lighting - baked_lighting;
     // Dynamic model shadows fall on the lightmapped world and on static props
     // (Source's shadow manager projects its render-to-texture shadows onto
     // brushes and static-prop receivers, not onto other models).
@@ -480,6 +484,21 @@ fn fragment(in: SourceVertexOutput, @builtin(front_facing) is_front: bool) -> Fr
     // Props carry their baked or ambient irradiance in linear vertex colours.
     var out: FragmentOutput;
     var diffuse = input.material.base_color.rgb * lighting;
+#ifdef VERTEX_COLORS
+#ifdef VERTEX_UVS_A
+    // Static props carry baked irradiance in the vertex colour, which Bevy
+    // has already multiplied into base_color. Source draws the flashlight as
+    // its own additive pass over the bare albedo, so the dynamic part must
+    // not be scaled by that baked light again: c2m1's guardrail
+    // (VertexLitGeneric, dark baked light) stayed almost black under a beam
+    // that lit it brightly in retail (25 Nov).
+    if source_uniform.settings.y < 0.5 && source_uniform.lightmap_params.x < 0.5 {
+        let bare = textureSample(pbr_bindings::base_color_texture, pbr_bindings::base_color_sampler, in.uv).rgb
+            * pbr_bindings::material.base_color.rgb;
+        diffuse += (bare - input.material.base_color.rgb) * torch_light;
+    }
+#endif
+#endif
 #ifdef VERTEX_UVS_A
     if source_uniform.emission_tint.w > 0.5 {
         // Sample albedo independently: static vertex colours contain baked

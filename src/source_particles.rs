@@ -140,6 +140,10 @@ impl Renderer {
 #[derive(Clone)]
 struct Definition {
     minimum_rendered_frames: u8,
+    /// "minimum simulation time step" (s): Source simulates the system in
+    /// steps no shorter than this, and Movement Basic's drag applies once
+    /// per step.
+    drag_step: f32,
     child_delay: f32,
     parent: Option<usize>,
     parent_particles: Option<ParentParticles>,
@@ -363,6 +367,7 @@ fn definition(elements: &[Element], index: usize) -> Option<Definition> {
     };
     let mut d = Definition {
         minimum_rendered_frames: node.number("minimum rendered frames",0.).clamp(0.,8.) as u8,
+        drag_step: node.number("minimum simulation time step", 0.).clamp(1. / 30., 1.),
         child_delay: 0.,
         parent: None,
         parent_particles: None,
@@ -2444,8 +2449,9 @@ pub fn update(
                         // that could still be alive.
                         let t = backlog.min(p.life * 0.98) * (particle_index as f32 + 0.5) / count as f32;
                         let g = Vec3::from_array(binary::source_position(d.gravity.to_array()));
-                        // Movement Basic: v *= (1 - drag)^(30 dt), then + g dt.
-                        let k = if d.drag > 0. { -30. * (1. - d.drag).max(1e-6).ln() } else { 0. };
+                        // Movement Basic: v *= (1 - drag) per simulation step
+                        // (30 Hz, or the system's minimum step), then + g dt.
+                        let k = if d.drag > 0. { -(1. - d.drag).max(1e-6).ln() / d.drag_step } else { 0. };
                         let v0 = p.velocity;
                         let (offset, v) = if k > 1e-4 {
                             let e = (-k * t).exp();
@@ -2512,7 +2518,10 @@ pub fn update(
         for p in batch.particles.iter_mut().take(old_count) {
             p.previous_position = p.position;
             p.age += dt;
-            p.velocity *= (1. - d.drag).powf(dt * 30.);
+            // Drag once per simulation step: inferno_wall_occlusion (drag .05,
+            // minimum step .138 s) rose ~105 units at 30 Hz drag against
+            // retail's ~170, leaving c1m1's fireballs ~80 px low (25 Nov).
+            p.velocity *= (1. - d.drag).powf(dt / d.drag_step);
             p.velocity += Vec3::from_array(binary::source_position(d.gravity.to_array())) * dt;
             p.position += p.velocity * dt;
             if let (Some((rotation, range)), Some(delta)) = (d.control_lock, delta) {
@@ -2727,9 +2736,12 @@ pub fn update(
                     (camera_right, camera_up)
                 };
                 let (right, up) = billboard_axes(base_right, base_up, p.rotation, radius);
-                // $cropfactor keeps the frame's proportions: the sprite
-                // shrinks to the cropped part of the frame.
-                let (mut right, up) = (right * batch.crop[0], up * batch.crop[1]);
+                // $cropfactor only narrows the texture coordinates (SpriteCard
+                // CROP combo): the cropped part of the frame is stretched over
+                // the full sprite, which keeps its size. Shrinking the quad
+                // made c1m1's inferno_wall (fire_molotov_crop_low, [0.5 1])
+                // half as wide and lost its near flames against retail (25 Nov).
+                let mut right = right;
                 if p.flipped {
                     right = -right;
                 }

@@ -394,6 +394,7 @@ pub(crate) fn execute(
         "noclip"=>{if state.noclip {match collision.supported_spawn_near(body.feet,HEIGHT){Ok(p)=>body.feet=p,Err(_)=>return "Cannot leave noclip inside solid geometry; fly into clear space first.".into()}}state.noclip=!state.noclip;body.velocity=Vec3::ZERO;format!("noclip {}",state.noclip)},
         "flashlight"=>{state.flashlight=!state.flashlight;format!("flashlight {}",state.flashlight)},
         "director_force_panic_event"=>{state.panic=true;"Panic event".into()},
+        "edit_world"=>{crate::world_editor::request_open();state.open=false;"Opening EDIT WORLD (single-player campaign, sv_cheats 1)".into()},
         "director_stop"=>{crate::game_state::set_director_stopped(true);String::new()},
         "director_start"=>{crate::game_state::set_director_stopped(false);String::new()},
         "bot_setpos" => {
@@ -480,14 +481,26 @@ fn console(
     }
     if frontend.page == Page::Game {
         *game_frames += 1;
+        // A queue in frame order, one per frame: commands sharing a frame
+        // run on the frames that follow instead of all but one being lost.
+        static RUN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let args: Vec<String> = std::env::args().collect();
-        scripted = args
+        let mut queued: Vec<(u32, String)> = args
             .windows(2)
             .filter(|w| w[0] == "--capture-command")
-            .find_map(|w| {
+            .filter_map(|w| {
                 let (frame, command) = w[1].split_once(' ')?;
-                (frame.parse::<u32>().ok()? == *game_frames).then(|| command.to_string())
-            });
+                Some((frame.parse::<u32>().ok()?, command.to_string()))
+            })
+            .collect();
+        queued.sort_by_key(|(frame, _)| *frame);
+        let next = RUN.load(std::sync::atomic::Ordering::Relaxed);
+        if let Some((frame, command)) = queued.get(next)
+            && *frame <= *game_frames
+        {
+            RUN.store(next + 1, std::sync::atomic::Ordering::Relaxed);
+            scripted = Some(command.clone());
+        }
     }
     // Source launch arguments (`-dev`, `+developer 2`, `+map c1m1_hotel`):
     // one queued command per frame once loading is done.

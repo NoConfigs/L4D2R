@@ -60,7 +60,12 @@ fn fragment(v: Output) -> @location(0) vec4<f32> {
     if add_self == 0.0 && alpha <= 0.01 { discard; }
     let rgb = frame.rgb * settings.z * v.color.rgb;
     if add_self != 0.0 {
-        return vec4(rgb * alpha * (1.0 + settings.z * add_self * v.color.a), alpha);
+        // Retail spritecard_ps20b ADDSELF combo (static 384, disassembled
+        // 25 Nov): rgb = tex * overbright * (tex.a * v.a), then
+        // mad(addself, rgb, rgb), then * v.rgb; blended ONE:INVSRCALPHA.
+        // The self-add factor is 1 + $addself, not scaled by overbright or
+        // vertex alpha (c1m1 fireballs were too dim, its low flames too hot).
+        return vec4(rgb * alpha * (1.0 + add_self), alpha);
     }
     // Bevy's Add pass shares its premultiplied blend state. Zero output alpha
     // preserves the framebuffer while the source contribution is alpha weighted.

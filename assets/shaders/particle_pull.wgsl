@@ -109,7 +109,21 @@ fn sprite_color(v: Output) -> vec4<f32> {
             let base = textureSample(refract_base, refract_base_sampler, v.current_uv);
             refracted += base.rgb * base.a * tint * v.color.a;
         }
-        return vec4(refracted, clamp(frame.a * v.color.a, 0.0, 1.0));
+        let mask = clamp(frame.a * v.color.a, 0.0, 1.0);
+        if settings.w != 0.0 {
+            // Refract with $additive (rain_storm's warp_rain2): Source adds
+            // the refracted scene onto the frame (ONE, ONE), so each streak
+            // brightens what is behind it. Replacing the pixel instead drew
+            // the same fog colour back and the rain was invisible. This pass
+            // is opaque (transmissive), so add onto the scene behind here.
+            // Source blends in its gamma-space target: add there, then
+            // return to this linear target (a linear add of the dim fog
+            // value barely showed).
+            let behind = textureSampleLevel(view_transmission_texture, view_transmission_sampler, screen_uv, 0.0).rgb;
+            let gamma = pow(max(behind, vec3(0.0)), vec3(1.0 / 2.2)) + pow(max(refracted, vec3(0.0)), vec3(1.0 / 2.2)) * mask;
+            return vec4(pow(gamma, vec3(2.2)), 1.0);
+        }
+        return vec4(refracted, mask);
     }
     let alpha = frame.a * v.color.a;
 #ifdef PARTICLE_MOD2X
@@ -128,7 +142,12 @@ fn sprite_color(v: Output) -> vec4<f32> {
         return vec4(rgb * alpha - add_self * frame.rgb * frame.a * settings.z, alpha);
     }
     if add_self != 0.0 {
-        return vec4(rgb * alpha * (1.0 + settings.z * add_self * v.color.a), alpha);
+        // Retail spritecard_ps20b ADDSELF combo (static 384, disassembled
+        // 25 Nov): rgb = tex * overbright * (tex.a * v.a), then
+        // mad(addself, rgb, rgb), then * v.rgb; blended ONE:INVSRCALPHA.
+        // The self-add factor is 1 + $addself, not scaled by overbright or
+        // vertex alpha (c1m1 fireballs were too dim, its low flames too hot).
+        return vec4(rgb * alpha * (1.0 + add_self), alpha);
     }
     // Bevy's Add pass shares its premultiplied blend state. Zero output alpha
     // preserves the framebuffer while the source contribution is alpha weighted.
