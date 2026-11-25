@@ -956,7 +956,11 @@ fn overlays(
         let origin = binary::vec3(o, 328)?;
         let n = binary::vec3(o, 340)?;
         let u = [points[0][2], points[1][2], points[2][2]];
-        let v = [n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2], n[0] * u[1] - n[1] * u[0]];
+        // vbsp stores whether V is N x U or its negation in the fourth UV
+        // point's z (1: flipped). Ignoring it mirrored those overlays
+        // (c4m2's saferoom checkpoint stencil).
+        let flip = if points[3][2] != 0. { -1. } else { 1. };
+        let v = [n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2], n[0] * u[1] - n[1] * u[0]].map(|x| x * flip);
         if u.iter().chain(&v).chain(&n).any(|x| !x.is_finite()) || u == [0.; 3] {
             continue;
         }

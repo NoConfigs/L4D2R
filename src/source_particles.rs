@@ -1206,13 +1206,28 @@ pub fn setup(
                         crate::material::particle_refraction(&mut assets, &d.material)?;
                     let refraction_amount =
                         refraction.as_ref().map_or(0., |(_, amount, _)| *amount);
+                    // Refract: the sprite texture is the normal map (it bends
+                    // the scene); a $basetexture is drawn over it separately.
                     let bytes = assets.read(
-                        material
-                            .base
-                            .as_deref()
-                            .or_else(|| refraction.as_ref().map(|(path, _, _)| path.as_str()))
+                        refraction
+                            .as_ref()
+                            .map(|(path, _, _)| path.as_str())
+                            .or(material.base.as_deref())
                             .ok_or_else(|| binary::invalid("Particle texture missing"))?,
                     )?;
+                    let refract_base = match (refraction.is_some(), material.base.as_deref()) {
+                        (true, Some(path)) => {
+                            let decoded = crate::vtf::decode(&assets.read(path)?, 2048)?;
+                            Some(images.add(Image::new(
+                                Extent3d { width: decoded.width, height: decoded.height, depth_or_array_layers: 1 },
+                                TextureDimension::D2,
+                                decoded.rgba,
+                                TextureFormat::Rgba8UnormSrgb,
+                                RenderAssetUsages::RENDER_WORLD,
+                            )))
+                        }
+                        _ => None,
+                    };
                     let sheet = source_pcf::sheet(&bytes)?;
                     let texture = crate::vtf::decode(&bytes, 2048)?;
                     TEXTURE_HEIGHTS.lock().unwrap().get_or_insert_with(HashMap::new).insert(d.material.clone(), texture.height as f32);
@@ -1297,6 +1312,8 @@ pub fn setup(
                             mod2x: crate::material::particle_mod2x(&mut assets, &d.material).unwrap_or(false),
                             depth_blend: crate::material::particle_depth_blend(&mut assets, &d.material).unwrap_or(0.),
                             sky_fog: Vec4::ZERO,
+                            refract_base_on: f32::from(refract_base.is_some()),
+                            refract_base: refract_base.unwrap_or_else(|| texture.clone()),
                             spitter_noise,
                             vertices: pull.buffer.clone(),
                             texture,
@@ -2689,7 +2706,14 @@ pub fn update(
                         batch.sizes,
                     )
                 } else {
-                    (live_radius(d, p, origin).unwrap_or(p.radius * scale), 1.)
+                    // SpriteCard $MINSIZE/$MAXSIZE/$STARTFADESIZE/
+                    // $ENDFADESIZE against the view depth (clip w), not the
+                    // straight distance: c13m4's smoke_precipitation
+                    // (vistasmokev5_nearcull, fade .35-.55) spawns 200-300
+                    // units around the eye and must vanish up close; without
+                    // it the near smoke hazed the whole view.
+                    let depth = (p.position - camera.translation).dot(camera.rotation * Vec3::NEG_Z).max(0.01);
+                    sprite_extent(live_radius(d, p, origin).unwrap_or(p.radius * scale), depth, batch.sizes)
                 };
                 let (base_right, base_up) = if matches!(renderer.orientation, 2 | 3) {
                     let normal = if renderer.orientation == 3 {

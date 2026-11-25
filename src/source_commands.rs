@@ -145,7 +145,7 @@ pub fn submit(text: &str) {
 const CVARS: &[(&str, &str)] = &[
     ("sv_cheats", "0"), ("sv_allow_votes", "1"), ("sv_player_stuck_tolerance", "10"),
     ("sv_regeneration_force_on", "0"), ("director_afk_timeout", "45"),
-    ("director_no_survivor_bots", "0"), ("director_stop", "0"), ("mp_gamemode", "coop"),
+    ("director_no_survivor_bots", "0"), ("mp_gamemode", "coop"),
     ("mp_allowspectators", "1"), ("z_finale_spawn_safety_range", "600"), ("fps_max", "300"),
     ("cl_interp", "0.1"), ("fog_override", "0"), ("fog_start", "-1"), ("fog_end", "-1"),
     ("fog_color", "-1 -1 -1"), ("fog_startskybox", "-1"), ("fog_endskybox", "-1"),

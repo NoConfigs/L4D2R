@@ -14,6 +14,16 @@
 #ifdef DEFERRED_PREPASS
 #import bevy_pbr::rgb9e5
 #endif
+#import "shaders/source_uniform.wgsl"::source_uniform
+
+// Per-map globals (native_fog::sky_globals, reserved last slot); [2].x is the
+// world farz in metres.
+struct SourceFarLight {
+    cube: array<vec4<f32>, 6>,
+    sun_direction: vec4<f32>,
+    sun_color: vec4<f32>,
+}
+@group(#{MATERIAL_BIND_GROUP}) @binding(107) var<storage, read> lighting_table: array<SourceFarLight>;
 
 #ifdef MORPH_TARGETS
 // The instance_index parameter must match vertex_in.instance_index. This is a work around for a wgpu dx12 bug.
@@ -149,6 +159,20 @@ fn vertex(vertex_no_morph: Vertex
     out.unclipped_depth = out.position.z;
     out.position.z = min(out.position.z, 1.0); // Clamp depth to avoid clipping
 #endif // UNCLIPPED_DEPTH_ORTHO_EMULATION
+#ifndef SOURCE_SKY_DEPTH
+    // World geometry past the fog controller's farz is discarded in the main
+    // pass, but a depth-only prepass runs no fragment stage for opaque
+    // materials, so it wrote that geometry's depth and hid the 3D skybox
+    // behind it (c4m2: blue tree and horizon silhouettes). Vertices past
+    // farz go to the far plane (reverse Z: 0) instead.
+    {
+        let far_clip = lighting_table[4095u].cube[2];
+        if source_uniform.settings.z < 0.5 && far_clip.x > 0.0
+            && length(out.world_position.xyz - view.world_position.xyz) > far_clip.x {
+            out.position.z = 0.0;
+        }
+    }
+#endif
 #ifdef SOURCE_SKY_DEPTH
     // Same depth push as source_vertex.wgsl. Without it a map with a depth
     // prepass (water) records the scaled 3D-sky props and brushes at their

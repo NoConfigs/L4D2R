@@ -323,6 +323,31 @@ pub(crate) struct Prepared {
     campaign: Campaign,
     scene: Scene,
 }
+/// The centre (Source units) of the map's NAV PLAYER_START area nearest
+/// `near`, where retail starts survivors that have no player start or
+/// survivor position for the mode.
+fn player_start_near(path: &Path, near: [f32; 3]) -> Option<[f32; 3]> {
+    // PLAYER_START first; maps without one (c4m2) start in the CHECKPOINT
+    // (saferoom) area nearest the landmark.
+    const PLAYER_START: u32 = 0x80;
+    const CHECKPOINT: u32 = 0x800;
+    let nav = l4d2_formats::nav::parse_nav(&std::fs::read(path.with_extension("nav")).ok()?).ok()?;
+    let nearest = |bit: u32| {
+        nav.areas
+            .iter()
+            .filter(|a| a.spawn_attributes & bit != 0)
+            .map(|a| {
+                let z = (a.nw[2] + a.se[2] + a.ne_z + a.sw_z) / 4.;
+                [(a.nw[0] + a.se[0]) / 2., (a.nw[1] + a.se[1]) / 2., z]
+            })
+            .min_by(|a, b| {
+                let d = |p: &[f32; 3]| (0..3).map(|i| (p[i] - near[i]).powi(2)).sum::<f32>();
+                d(a).total_cmp(&d(b))
+            })
+    };
+    nearest(PLAYER_START).or_else(|| nearest(CHECKPOINT))
+}
+
 pub(crate) fn prepare(
     root: &Path,
     path: &Path,
@@ -526,7 +551,16 @@ pub(crate) fn prepare(
         });
     let start_angles = local_spawn.map(|e| crate::kv::vector(e.get("angles")));
     if let Some(entity) = local_spawn {
-        let mut position = binary::source_position(crate::kv::vector(entity.get("origin")));
+        let mut origin = crate::kv::vector(entity.get("origin"));
+        // A bare landmark (no coop player start or survivor position, as on
+        // c4m2) can sit inside the wall between two rooms: retail spawns in
+        // the start area instead (the NAV PLAYER_START area nearest it).
+        if entity.get("classname").is_some_and(|c| c == "info_landmark") {
+            if let Some(start) = player_start_near(path, origin) {
+                origin = start;
+            }
+        }
+        let mut position = binary::source_position(origin);
         position[1] += EYE;
         world.spawn = position;
     }
@@ -911,10 +945,13 @@ pub(crate) fn prepare(
         let model = format!("models/survivors/survivor_{character}.mdl");
         scene.add_models(root, &[model.clone()])?;
         scene.pose_model(root, &model, &["Idle_Standing_pistol"], None, false)?;
+        // Only this mode's named positions: c4m2's Scavenge-only
+        // "Coach" spot put the bots ~7,000 units from the campaign start.
         let position = scene
             .world
             .entities
             .iter()
+            .filter(|e| for_mode(e))
             .find(|e| {
                 e.get("classname")
                     .is_some_and(|c| c == "info_survivor_position")
@@ -1601,6 +1638,7 @@ pub fn run(root: &Path, path: &Path, capture: Option<String>, verify: bool) -> i
     crate::dev_console::install(&mut app);
     crate::runtime_props::install(&mut app);
     crate::world_editor::install(&mut app);
+    crate::edit_world_ui::install(&mut app);
     crate::glow_menu::install(&mut app);
     crate::game_chat::install(&mut app);
     crate::multiplayer::install(&mut app);
@@ -2263,13 +2301,20 @@ pub(crate) fn controls(
     if keys.just_pressed(KeyCode::Escape) {
         s.paused = true;
     }
+    // EDIT WORLD (Hammer / Roblox Studio camera): the cursor stays free for
+    // the editor's panels and only turns the view while RMB is held.
+    let edit_cursor = crate::world_editor::edit_cursor();
+    if edit_cursor.is_some() && !keys.just_pressed(KeyCode::Escape) {
+        s.paused = false;
+        *refocus = false;
+    }
     let start = (s.paused || *refocus) && mouse.just_pressed(MouseButton::Left) && window.focused && !s.dead;
     if start {
         s.paused = false;
         *refocus = false;
     }
     let away = !window.focused || *refocus;
-    let visible = s.paused || s.dead || away;
+    let visible = s.paused || s.dead || away || edit_cursor == Some(false);
     // iOS rejects cursor grabs and Bevy restores the previous mode. Retrying
     // it each frame makes capture_changed permanently true, dropping all look
     // deltas. Touch dragging never requires a captured desktop cursor.
@@ -2301,7 +2346,7 @@ pub(crate) fn controls(
         *wheel_remainder = 0.;
         return;
     }
-    if !changed && !capture_changed {
+    if !changed && !capture_changed && edit_cursor != Some(false) {
         body.yaw -= motion.delta.x * 0.002;
         body.pitch = (body.pitch - motion.delta.y * 0.002).clamp(-1.5, 1.5);
     }
@@ -4063,7 +4108,7 @@ fn director(
     // (net_infected).
     drop(_dir2);
     let _dir3 = crate::performance::scope("director::spawn");
-    if crate::net_play::guest() {
+    if crate::net_play::guest() || crate::game_state::director_stopped() {
         return;
     }
     let mut fallen_count = enemies
@@ -6616,6 +6661,23 @@ fn capture_telemetry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn c4m2_bare_landmark_spawn_moves_into_the_player_start_area() {
+        // Retail's direct-load spawn on c4m2 is (3754 -1598), in the start
+        // saferoom; landmark_c4m1 (3776 -1728) sits inside a wall.
+        let map = Path::new("C:/Program Files (x86)/Steam/steamapps/common/Left 4 Dead 2/left4dead2/maps/c4m2_sugarmill_a.bsp");
+        if !map.exists() {
+            return;
+        }
+        let nav = l4d2_formats::nav::parse_nav(&std::fs::read(map.with_extension("nav")).unwrap()).unwrap();
+        let starts: Vec<_> = nav.areas.iter().filter(|a| a.spawn_attributes & 0x80 != 0).map(|a| (a.nw, a.se)).collect();
+        let found = player_start_near(map, [3776., -1728., 296.5]);
+        println!("c4m2 PLAYER_START areas {} (checkpoint fallback): {:?}; nearest centre {found:?}", starts.len(), &starts[..starts.len().min(8)]);
+        let p = found.expect("a start or checkpoint area");
+        assert!((p[0] - 3776.).abs() > 1. || (p[1] + 1728.).abs() > 1., "{p:?}");
+        // In the start saferoom, near retail's spawn.
+        assert!(((p[0] - 3754.).powi(2) + (p[1] + 1598.).powi(2)).sqrt() < 250., "{p:?}");
+    }
     #[test]
     fn menu_map_replacement_registers_both_player_ladder_types() {
         let root = Path::new("C:/Program Files (x86)/Steam/steamapps/common/Left 4 Dead 2");

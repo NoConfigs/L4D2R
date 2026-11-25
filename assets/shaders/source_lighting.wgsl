@@ -422,7 +422,12 @@ fn fragment(in: SourceVertexOutput, @builtin(front_facing) is_front: bool) -> Fr
             if cone>0.0 && (torch.flags & POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
                 shadow=fetch_spot_shadow(light_index,input.world_position,input.N,torch.shadow_map_near_z,in.position.xy);
             }
-            let falloff=pow(max(0.0,1.0-distance2*torch.color_inverse_square_range.w),2.0)/distance2;
+            // Source's flashlight attenuates linearly (r_flashlightconstant 0,
+            // r_flashlightlinear 100, r_flashlightquadratic 0): 1/d, not 1/d^2.
+            // Scaled to equal the old inverse-square value at 2 m, where the
+            // brightness was matched; the c2m1 guardrail ~5 m out was too
+            // dark against retail with 1/d^2.
+            let falloff=pow(max(0.0,1.0-distance2*torch.color_inverse_square_range.w),2.0)/(sqrt(distance2)*2.0);
 #ifdef SOURCE_CAP_PHONG
             lighting+=torch.color_inverse_square_range.rgb*0.3*cone*cone*falloff*shadow*cap_light(dot(input.N,-normalize(delta)));
 #ifdef VERTEX_UVS_A

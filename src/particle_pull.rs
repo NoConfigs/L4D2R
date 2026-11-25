@@ -43,6 +43,17 @@ pub struct ParticlePull {
     /// 3D-skybox copies: the sky_camera fog colour (effects.y 3).
     #[uniform(110)]
     pub sky_fog: Vec4,
+    /// Refract particles with a $basetexture (rain_storm's warp_rain2): the
+    /// sprite texture is the normal map that bends the scene, and this base
+    /// texture is added over the refraction ($additive). Without it the
+    /// base texture was read as the normal map and never drawn, so retail's
+    /// pale rain streaks were nearly invisible.
+    #[texture(111)]
+    #[sampler(112)]
+    pub refract_base: Handle<Image>,
+    /// 1 when `refract_base` holds a real base texture.
+    #[uniform(113)]
+    pub refract_base_on: f32,
     /// SpriteCard $MOD2X: the sprite multiplies the scene by twice its
     /// colour (mid-grey leaves it unchanged), e.g. fire glows.
     pub mod2x: bool,

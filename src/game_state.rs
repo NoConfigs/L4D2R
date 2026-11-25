@@ -359,6 +359,16 @@ static BOTS_STOPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 pub fn bots_stopped() -> bool {
     BOTS_STOPPED.load(std::sync::atomic::Ordering::Relaxed)
 }
+/// Retail `director_stop` / `director_start`: the director spawns nothing
+/// (no commons, specials, witches or tanks) while stopped; map logic and
+/// scripts keep running. EDIT WORLD stops it while editing.
+static DIRECTOR_STOPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn director_stopped() -> bool {
+    DIRECTOR_STOPPED.load(std::sync::atomic::Ordering::Relaxed)
+}
+pub fn set_director_stopped(stopped: bool) {
+    DIRECTOR_STOPPED.store(stopped, std::sync::atomic::Ordering::Relaxed);
+}
 /// `bot_setpos <survivor> x y z [yaw]` requests (Source units/degrees),
 /// applied by the bot update: matched parity captures need bots on exact
 /// spots.

@@ -160,6 +160,7 @@ mod precipitation;
 mod dev_console;
 mod source_commands;
 mod runtime_props;
+mod edit_world_ui;
 mod world_editor;
 mod hotel_live_test;
 mod infected_death;

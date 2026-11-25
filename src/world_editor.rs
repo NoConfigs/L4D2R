@@ -7,43 +7,78 @@
 //! script (`testscripts/`, retail convention: create, test_wait, AddOutput
 //! HammerId, ent_keyvalue) rebuilds them in the rewrite and in retail.
 //!
-//! Keys while editing: LMB place, RMB select, [ ] previous/next model,
-//! / search models, arrows and PageUp/PageDown move 8 units, Q/E rotate 15
-//! degrees, Delete remove, Ctrl+D duplicate, F5 play/edit, F6 save,
-//! F7 load the last saved file. Enter opens the inspector line for the
-//! selected object (see `apply_line`): keyvalues, class name, outputs,
-//! one-word OnTakeDamage pickups (`give`, `health`) and new entities.
+//! The interface (crate::edit_world_ui) works like Hammer or Roblox Studio:
+//! the cursor stays free, holding RMB looks around (WASD flies), a browser
+//! with tabs lists props and entities with a preview, a translucent ghost
+//! shows where a pick lands, arrows move the selection by the grid (studs),
+//! handles resize triggers, and double-clicking opens its properties.
+//! Keys: arrows/PageUp/PageDown nudge by the grid, Q/E rotate 15 degrees,
+//! Delete, Ctrl+D duplicate, F5 play/edit, F6 save, F7 load. Enter still
+//! opens the inspector line (`apply_line`) for typed edits.
 use bevy::input::keyboard::KeyboardInput;
 use bevy::input::ButtonState;
 use bevy::prelude::*;
 
-const SNAP: f32 = 8.;
 const TURN: f32 = 15.;
+
+/// What the next click in the world places.
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) enum Place {
+    /// A prop_dynamic with this model.
+    Model(String),
+    /// A point or trigger entity of this class.
+    Class(String),
+}
 
 #[derive(Resource, Default)]
 pub struct Editor {
     /// Edit mode (false: playing the edited map, or not using the editor).
     pub editing: bool,
     /// Ever opened this map (F5 only works then).
-    opened: bool,
+    pub(crate) opened: bool,
     /// Entities this editor created or loaded.
-    objects: Vec<usize>,
-    selected: Option<usize>,
-    models: Vec<String>,
-    model: usize,
-    search: Option<String>,
+    pub(crate) objects: Vec<usize>,
+    pub(crate) selected: Option<usize>,
+    pub(crate) models: Vec<String>,
+    pub(crate) model: usize,
+    pub(crate) search: Option<String>,
     /// The inspector line being typed (Enter opens, Enter applies).
-    command: Option<String>,
-    next_hammer: u32,
-    status: String,
-    last_file: Option<String>,
+    pub(crate) command: Option<String>,
+    pub(crate) next_hammer: u32,
+    pub(crate) status: String,
+    pub(crate) last_file: Option<String>,
+    /// Grid ("studs") in Source units; 0 means the default 8.
+    pub(crate) grid: f32,
+    pub(crate) placing: Option<Place>,
+    /// This frame's left button (just pressed, held, just released) and
+    /// whether the right button is held (camera look), captured before the
+    /// editor hides them from the game.
+    pub(crate) lmb: (bool, bool, bool),
+    pub(crate) rmb_down: bool,
+    /// Set by the UI while a text field has focus: keys belong to it.
+    pub(crate) typing: bool,
+}
+
+impl Editor {
+    pub(crate) fn grid(&self) -> f32 {
+        if self.grid > 0. { self.grid } else { 8. }
+    }
+}
+
+static EDITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LOOK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// While editing: Some(true) when RMB is held (the game captures the cursor
+/// and turns the view), Some(false) for a free cursor; None when not editing.
+pub fn edit_cursor() -> Option<bool> {
+    EDITING
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .then(|| LOOK.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Marker on the pause menu's EDIT WORLD button.
 #[derive(Component)]
 pub struct EditWorldButton;
-#[derive(Component)]
-struct Overlay;
 
 static OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -70,8 +105,8 @@ pub fn allowed(frontend: &crate::game_menu::Frontend, session: Option<&crate::mu
 
 pub fn install(app: &mut App) {
     app.init_resource::<Editor>()
-        .add_systems(PreUpdate, input.after(bevy::input::InputSystems))
-        .add_systems(Update, (button_visibility, overlay));
+        .add_systems(PreUpdate, input.after(bevy::ui::UiSystems::Focus))
+        .add_systems(Update, button_visibility);
 }
 
 fn button_visibility(
@@ -88,14 +123,21 @@ fn button_visibility(
     }
 }
 
-fn set_mode(editor: &mut Editor, console: &mut crate::game_console::Console, editing: bool) {
+pub(crate) fn set_mode(editor: &mut Editor, console: &mut crate::game_console::Console, editing: bool) {
     editor.editing = editing;
+    EDITING.store(editing, std::sync::atomic::Ordering::Relaxed);
+    if !editing {
+        editor.placing = None;
+        LOOK.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
     console.noclip = editing;
     crate::source_commands::submit(if editing { "sb_stop 1" } else { "sb_stop 0" });
+    // No infected spawn while editing; play mode runs the director again.
+    crate::source_commands::submit(if editing { "director_stop" } else { "director_start" });
     editor.status = if editing { "Editing".into() } else { "Playing (F5 to edit)".into() };
 }
 
-fn source(v: Vec3) -> [f32; 3] {
+pub(crate) fn source(v: Vec3) -> [f32; 3] {
     [v.x / crate::collision::UNIT, -v.z / crate::collision::UNIT, v.y / crate::collision::UNIT]
 }
 
@@ -135,6 +177,7 @@ fn input(
         set_mode(&mut editor, &mut console, true);
     }
     if !editor.opened || frontend.page != crate::game_menu::Page::Game || console.open {
+        LOOK.store(false, std::sync::atomic::Ordering::Relaxed);
         return;
     }
     if !allowed(&frontend, session.as_deref()) {
@@ -143,6 +186,22 @@ fn input(
         }
         return;
     }
+    // Objects a saved script rebuilt (F7, or test_startscript in the console)
+    // carry the exporter's l4d2r_edit_* class tag: adopt them, so the next
+    // save includes them and the next load replaces them.
+    let adopted: Vec<usize> = logic
+        .world
+        .ents
+        .iter()
+        .enumerate()
+        .filter(|(i, e)| {
+            e.alive
+                && e.me.kv("classname").is_some_and(|c| c.to_ascii_lowercase().starts_with("l4d2r_edit_"))
+                && !editor.objects.contains(i)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    editor.objects.extend(adopted);
     if keys.just_pressed(KeyCode::F5) {
         let editing = !editor.editing;
         set_mode(&mut editor, &mut console, editing);
@@ -213,121 +272,69 @@ fn input(
         mouse.reset_all();
         return;
     }
+    // Mouse: edit_world_ui handles clicks on panels and in the world; keep
+    // this frame's buttons for it, then hide them from the game so editing
+    // never fires a weapon.
+    editor.lmb = (
+        mouse.just_pressed(MouseButton::Left),
+        mouse.pressed(MouseButton::Left),
+        mouse.just_released(MouseButton::Left),
+    );
+    editor.rmb_down = mouse.pressed(MouseButton::Right);
+    LOOK.store(editor.rmb_down, std::sync::atomic::Ordering::Relaxed);
+    mouse.reset(MouseButton::Left);
+    mouse.reset(MouseButton::Right);
+    if editor.typing {
+        // A UI text field owns the keyboard (edit_world_ui reads the typed
+        // characters); WASD must not fly and shortcuts must not fire.
+        keys.reset_all();
+        return;
+    }
     typed.clear();
     if keys.just_pressed(KeyCode::Enter) {
         editor.command = Some(String::new());
         keys.reset_all();
         return;
     }
-    if keys.just_pressed(KeyCode::Slash) {
-        editor.search = Some(String::new());
-    }
-    let count = editor.models.len().max(1);
-    if keys.just_pressed(KeyCode::BracketRight) {
-        editor.model = (editor.model + 1) % count;
-    }
-    if keys.just_pressed(KeyCode::BracketLeft) {
-        editor.model = (editor.model + count - 1) % count;
+    if keys.just_pressed(KeyCode::Escape) && editor.placing.is_some() {
+        editor.placing = None;
+        editor.status = "Placing cancelled".into();
     }
     let Some(view) = camera.iter().next() else { return };
-    let (eye, forward) = (view.translation(), view.forward().as_vec3());
-    let left = mouse.just_pressed(MouseButton::Left);
-    let right = mouse.just_pressed(MouseButton::Right);
-    // The editor owns the mouse: no shots while editing.
-    mouse.reset(MouseButton::Left);
-    mouse.reset(MouseButton::Right);
-    // Retail prop_dynamic refuses breakable models, so the editor does too.
-    let breakable = |model: &str| {
-        root.as_ref()
-            .and_then(|r| crate::source_assets::SourceAssets::new(&r.0, vec![]).ok())
-            .is_some_and(|mut a| crate::source_breakables::model_health(&mut a, model) > 0.)
-    };
-    if left && editor.models.get(editor.model).is_some_and(|m| breakable(m)) {
-        editor.status = "That model is breakable: retail prop_dynamic refuses it. Pick another.".into();
-    } else if left {
-        if let Some(model) = editor.models.get(editor.model).cloned() {
-            let end = eye + forward * 200.;
-            let at = collision
-                .as_ref()
-                .and_then(|c| c.source_ray(source(eye), source(end), 0x1 | 0x2 | 0x8, true))
-                .map_or(source(eye + forward * 3.), |(_, p, _, _)| p);
-            let snap = |v: f32| (v / SNAP).round() * SNAP;
-            let at = l4d2r_math::Vec3::new(snap(at[0]), snap(at[1]), at[2]);
-            let yaw = ((-forward.z).atan2(forward.x).to_degrees() / TURN).round() * TURN + 180.;
-            let hammer = next_hammer(&mut editor, &logic);
-            let name = format!("edit_{hammer}");
-            let keys = vec![
-                ("model".to_string(), model.clone()),
-                ("solid".to_string(), "6".to_string()),
-                ("targetname".to_string(), name.clone()),
-                ("hammerid".to_string(), hammer.to_string()),
-            ];
-            let id = logic.world.create_entity("prop_dynamic", &keys, at, l4d2r_math::Vec3::new(0., yaw, 0.), Some(model));
-            crate::dev_console::SPAWNED.lock().unwrap().push(id);
-            editor.objects.push(id);
-            editor.selected = Some(id);
-            editor.status = format!("Placed {name}");
-        }
-    }
-    if right {
-        editor.selected = pick(&logic, eye, forward);
-    }
-    let Some(id) = editor.selected.filter(|&id| logic.world.ents.get(id).is_some_and(|e| e.alive)) else { return };
-    let mut origin = logic.world.ents[id].me.origin;
-    let mut angles = logic.world.ents[id].me.angles;
+    let forward = view.forward().as_vec3();
     let flat = Vec3::new(forward.x, 0., forward.z).normalize_or(Vec3::NEG_Z);
-    // Arrows move along the view's nearest world axis, like DeadForge.
+    // Arrows nudge along the view's nearest world axis by the grid.
     let axis = |v: Vec3| {
         let s = source(v);
         if s[0].abs() > s[1].abs() { l4d2r_math::Vec3::new(s[0].signum(), 0., 0.) } else { l4d2r_math::Vec3::new(0., s[1].signum(), 0.) }
     };
+    let grid = editor.grid();
     let ahead = axis(flat);
     let side = axis(Vec3::new(-flat.z, 0., flat.x));
-    let mut moved = false;
     for (key, delta) in [
-        (KeyCode::ArrowUp, ahead * SNAP),
-        (KeyCode::ArrowDown, ahead * -SNAP),
-        (KeyCode::ArrowRight, side * SNAP),
-        (KeyCode::ArrowLeft, side * -SNAP),
-        (KeyCode::PageUp, l4d2r_math::Vec3::new(0., 0., SNAP)),
-        (KeyCode::PageDown, l4d2r_math::Vec3::new(0., 0., -SNAP)),
+        (KeyCode::ArrowUp, ahead * grid),
+        (KeyCode::ArrowDown, ahead * -grid),
+        (KeyCode::ArrowRight, side * grid),
+        (KeyCode::ArrowLeft, side * -grid),
+        (KeyCode::PageUp, l4d2r_math::Vec3::new(0., 0., grid)),
+        (KeyCode::PageDown, l4d2r_math::Vec3::new(0., 0., -grid)),
     ] {
         if keys.just_pressed(key) {
-            origin += delta;
-            moved = true;
+            nudge(&mut editor, &mut logic, delta);
         }
     }
     if keys.just_pressed(KeyCode::KeyQ) {
-        angles.y = (angles.y + TURN).rem_euclid(360.);
-        moved = true;
+        rotate(&mut editor, &mut logic, TURN);
     }
     if keys.just_pressed(KeyCode::KeyE) {
-        angles.y = (angles.y - TURN).rem_euclid(360.);
-        moved = true;
-    }
-    if moved {
-        let f = |v: l4d2r_math::Vec3| format!("{} {} {}", v.x, v.y, v.z);
-        logic.world.set_keyvalue(id, "origin", &f(origin));
-        logic.world.set_keyvalue(id, "angles", &f(angles));
+        rotate(&mut editor, &mut logic, -TURN);
     }
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
     if ctrl && keys.just_pressed(KeyCode::KeyD) {
-        let e = logic.world.ents[id].clone();
-        let hammer = next_hammer(&mut editor, &logic);
-        let mut kv: Vec<(String, String)> = e.me.ent.0.iter().filter(|(k, _)| !matches!(k.to_ascii_lowercase().as_str(), "classname" | "hammerid" | "targetname")).cloned().collect();
-        kv.push(("targetname".into(), format!("edit_{hammer}")));
-        kv.push(("hammerid".into(), hammer.to_string()));
-        let copy = logic.world.create_entity(&e.me.classname, &kv, origin + l4d2r_math::Vec3::new(SNAP * 4., 0., 0.), angles, e.me.mdl.clone());
-        logic.world.ents[copy].conns = e.conns.clone();
-        crate::dev_console::SPAWNED.lock().unwrap().push(copy);
-        editor.objects.push(copy);
-        editor.selected = Some(copy);
-        editor.status = format!("Duplicated as edit_{hammer}");
+        duplicate(&mut editor, &mut logic);
     }
     if keys.just_pressed(KeyCode::Delete) {
-        logic.world.input(id, "Kill", "", None, None);
-        editor.selected = None;
-        editor.status = "Deleted".into();
+        delete(&mut editor, &mut logic);
     }
     if keys.just_pressed(KeyCode::F6) {
         if let Some(root) = root.as_ref() {
@@ -335,13 +342,124 @@ fn input(
         }
     }
     if keys.just_pressed(KeyCode::F7) {
-        match editor.last_file.clone() {
-            Some(file) => {
-                crate::source_commands::submit(&format!("test_startscript {file}"));
-                editor.status = format!("Loading {file}");
-            }
-            None => editor.status = "Nothing saved yet (F6)".into(),
+        load_last(&mut editor, &mut logic);
+    }
+    let _ = collision;
+}
+
+fn alive(logic: &crate::l4d2r_cinematic::MapLogic, id: usize) -> bool {
+    logic.world.ents.get(id).is_some_and(|e| e.alive)
+}
+
+/// Classes placed as box triggers (editable mins/maxs, resize handles).
+pub(crate) fn is_trigger(class: &str) -> bool {
+    class.starts_with("trigger_")
+}
+
+/// Places `what` at `at` (Source units); returns the status line.
+pub(crate) fn place(
+    editor: &mut Editor,
+    logic: &mut crate::l4d2r_cinematic::MapLogic,
+    what: &Place,
+    at: l4d2r_math::Vec3,
+    yaw: f32,
+    breakable: bool,
+) -> String {
+    let hammer = next_hammer(editor, logic);
+    let name = format!("edit_{hammer}");
+    let mut keys = vec![("targetname".to_string(), name.clone()), ("hammerid".to_string(), hammer.to_string())];
+    let id = match what {
+        Place::Model(_) if breakable => {
+            return "That model is breakable: retail prop_dynamic refuses it. Pick another.".into();
         }
+        Place::Model(model) => {
+            keys.push(("model".into(), model.clone()));
+            keys.push(("solid".into(), "6".into()));
+            logic.world.create_entity("prop_dynamic", &keys, at, l4d2r_math::Vec3::new(0., yaw, 0.), Some(model.clone()))
+        }
+        Place::Class(class) if is_trigger(class) => {
+            // A 64 x 64 x 64 box standing on the floor; Source's mins/maxs
+            // keyvalues (also how the exported script sizes it in retail).
+            let (lo, hi) = (l4d2r_math::Vec3::new(-32., -32., 0.), l4d2r_math::Vec3::new(32., 32., 64.));
+            keys.push(("mins".into(), "-32 -32 0".into()));
+            keys.push(("maxs".into(), "32 32 64".into()));
+            keys.push(("solid".into(), "2".into()));
+            keys.push(("spawnflags".into(), "1".into()));
+            let id = logic.world.create_entity(class, &keys, at, l4d2r_math::Vec3::ZERO, None);
+            logic.prop_bounds.insert(id, (lo, hi));
+            logic.triggers.push(id);
+            id
+        }
+        Place::Class(class) => logic.world.create_entity(class, &keys, at, l4d2r_math::Vec3::ZERO, None),
+    };
+    crate::dev_console::SPAWNED.lock().unwrap().push(id);
+    editor.objects.push(id);
+    editor.selected = Some(id);
+    format!("Placed {name}")
+}
+
+/// Moves the selection by `delta` (Source units).
+pub(crate) fn nudge(editor: &mut Editor, logic: &mut crate::l4d2r_cinematic::MapLogic, delta: l4d2r_math::Vec3) {
+    let Some(id) = editor.selected.filter(|&id| alive(logic, id)) else { return };
+    let o = logic.world.ents[id].me.origin + delta;
+    logic.world.set_keyvalue(id, "origin", &format!("{} {} {}", o.x, o.y, o.z));
+}
+
+/// Turns the selection about the vertical axis.
+pub(crate) fn rotate(editor: &mut Editor, logic: &mut crate::l4d2r_cinematic::MapLogic, degrees: f32) {
+    let Some(id) = editor.selected.filter(|&id| alive(logic, id)) else { return };
+    let mut a = logic.world.ents[id].me.angles;
+    a.y = (a.y + degrees).rem_euclid(360.);
+    logic.world.set_keyvalue(id, "angles", &format!("{} {} {}", a.x, a.y, a.z));
+}
+
+pub(crate) fn duplicate(editor: &mut Editor, logic: &mut crate::l4d2r_cinematic::MapLogic) {
+    let Some(id) = editor.selected.filter(|&id| alive(logic, id)) else { return };
+    let e = logic.world.ents[id].clone();
+    let hammer = next_hammer(editor, logic);
+    let mut kv: Vec<(String, String)> = e.me.ent.0.iter().filter(|(k, _)| !matches!(k.to_ascii_lowercase().as_str(), "classname" | "hammerid" | "targetname")).cloned().collect();
+    kv.push(("targetname".into(), format!("edit_{hammer}")));
+    kv.push(("hammerid".into(), hammer.to_string()));
+    let offset = l4d2r_math::Vec3::new(editor.grid() * 4., 0., 0.);
+    let copy = logic.world.create_entity(&e.me.classname, &kv, e.me.origin + offset, e.me.angles, e.me.mdl.clone());
+    logic.world.ents[copy].conns = e.conns.clone();
+    if let Some(bounds) = logic.prop_bounds.get(&id).copied().filter(|_| e.me.mdl.is_none()) {
+        logic.prop_bounds.insert(copy, bounds);
+        if is_trigger(&e.me.classname) {
+            logic.triggers.push(copy);
+        }
+    }
+    crate::dev_console::SPAWNED.lock().unwrap().push(copy);
+    editor.objects.push(copy);
+    editor.selected = Some(copy);
+    editor.status = format!("Duplicated as edit_{hammer}");
+}
+
+pub(crate) fn delete(editor: &mut Editor, logic: &mut crate::l4d2r_cinematic::MapLogic) {
+    let Some(id) = editor.selected.filter(|&id| alive(logic, id)) else { return };
+    logic.world.input(id, "Kill", "", None, None);
+    editor.objects.retain(|&o| o != id);
+    editor.selected = None;
+    editor.status = "Deleted".into();
+}
+
+/// F7: rebuild from the last saved script, replacing this session's objects.
+pub(crate) fn load_last(editor: &mut Editor, logic: &mut crate::l4d2r_cinematic::MapLogic) {
+    match editor.last_file.clone() {
+        Some(file) => {
+            // The script rebuilds everything: remove this session's
+            // objects first (the script's own header removes objects an
+            // earlier run made), so loading never duplicates the build.
+            for id in std::mem::take(&mut editor.objects) {
+                if alive(logic, id) {
+                    logic.world.input(id, "Kill", "", None, None);
+                }
+            }
+            editor.selected = None;
+            crate::source_commands::submit(&format!("test_startscript {file}"));
+            editor.status = format!("Loading {file}");
+        }
+        None => editor.status = "Nothing saved yet (F6)".into(),
     }
 }
 
@@ -420,7 +538,7 @@ pub fn apply_line(editor: &mut Editor, logic: &mut crate::l4d2r_cinematic::MapLo
 }
 
 /// The lowest unused HammerId above 1000.
-fn next_hammer(editor: &mut Editor, logic: &crate::l4d2r_cinematic::MapLogic) -> u32 {
+pub(crate) fn next_hammer(editor: &mut Editor, logic: &crate::l4d2r_cinematic::MapLogic) -> u32 {
     let used: std::collections::HashSet<u32> = logic.world.ents.iter().filter_map(|e| e.me.kv("hammerid")?.trim().parse().ok()).collect();
     let mut id = editor.next_hammer.max(1001);
     while used.contains(&id) {
@@ -430,28 +548,8 @@ fn next_hammer(editor: &mut Editor, logic: &crate::l4d2r_cinematic::MapLogic) ->
     id
 }
 
-/// The entity nearest the crosshair ray (any alive entity with a model).
-fn pick(logic: &crate::l4d2r_cinematic::MapLogic, eye: Vec3, forward: Vec3) -> Option<usize> {
-    logic
-        .world
-        .ents
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| e.alive && (e.me.mdl.is_some() || e.me.brush.is_some()))
-        .filter_map(|(i, e)| {
-            let o = e.me.origin;
-            let p = Vec3::new(o.x, o.z, -o.y) * crate::collision::UNIT;
-            let to = p - eye;
-            let along = to.dot(forward);
-            (along > 0. && along < 60.).then(|| (i, (to - forward * along).length() / along))
-        })
-        .filter(|(_, off)| *off < 0.12)
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(i, _)| i)
-}
-
 /// Writes `testscripts/edit_<map>.txt` in retail's convention.
-fn save(editor: &mut Editor, logic: &crate::l4d2r_cinematic::MapLogic, root: &std::path::Path, map: &str) -> String {
+pub(crate) fn save(editor: &mut Editor, logic: &crate::l4d2r_cinematic::MapLogic, root: &std::path::Path, map: &str) -> String {
     let text = export(logic, &editor.objects, map);
     let file = format!("edit_{map}.txt");
     let dir = root.join("left4dead2/testscripts");
@@ -480,6 +578,10 @@ pub fn export(logic: &crate::l4d2r_cinematic::MapLogic, objects: &[usize], map: 
         "sv_cheats 1;".to_string(),
         format!("// L4D2R EDIT WORLD - {map}"),
         "// Load the map, then run: sv_cheats 1; test_startscript <this file>".into(),
+        "// Remove what an earlier run of this script made, so loading it again".into(),
+        "// replaces the build instead of duplicating it.".into(),
+        "ent_fire l4d2r_edit_* kill;".into(),
+        wait.into(),
         "// Isolate existing props before assigning Hammer IDs.".into(),
         "ent_fire prop_dynamic addoutput \"classname l4d2r_existing_dynamic\";".into(),
         wait.into(),
@@ -489,7 +591,14 @@ pub fn export(logic: &crate::l4d2r_cinematic::MapLogic, objects: &[usize], map: 
     for &id in objects {
         let Some(e) = logic.world.ents.get(id).filter(|e| e.alive) else { continue };
         let hammer = e.me.kv("hammerid").unwrap_or("0").trim().to_string();
-        let class = e.me.kv("classname").unwrap_or(&e.me.classname).to_string();
+        // l4d2r_* class names are this exporter's own tags (an object rebuilt
+        // from a saved script): export its real class again.
+        let class = e
+            .me
+            .kv("classname")
+            .filter(|c| !c.to_ascii_lowercase().starts_with("l4d2r_"))
+            .unwrap_or(&e.me.classname)
+            .to_string();
         let extra: Vec<String> = e
             .me
             .ent
@@ -569,76 +678,6 @@ fn round(v: f32) -> f32 {
     (v * 1000.).round() / 1000.
 }
 
-fn overlay(
-    mut commands: Commands,
-    editor: Res<Editor>,
-    logic: Option<Res<crate::l4d2r_cinematic::MapLogic>>,
-    hud: Query<Entity, With<crate::game::ViewCamera>>,
-    mut panel: Query<(&mut Text, &mut Node), With<Overlay>>,
-) {
-    let show = editor.opened && editor.editing;
-    let text = if show {
-        let model = editor.models.get(editor.model).map_or("(no models)", |m| m.as_str());
-        let search = editor.search.as_ref().map_or(String::new(), |s| format!("\nSearch: {s}_"));
-        let search = match &editor.command {
-            Some(line) => format!("{search}\n> {line}_   (Enter apply, Esc cancel: key value | OnTakeDamage PD1,Command,give health | -key | give <item> | health | new <class>)"),
-            None => search,
-        };
-        let selected = match (editor.selected, logic.as_ref()) {
-            (Some(id), Some(logic)) if logic.world.ents.get(id).is_some_and(|e| e.alive) => {
-                let e = &logic.world.ents[id];
-                let o = e.me.origin;
-                let a = e.me.angles;
-                let outputs: String = e.conns.iter().map(|c| format!("\n  {} -> {},{},{}", c.output, c.target, c.input, c.param)).collect();
-                let keyvalues: String = e
-                    .me
-                    .ent
-                    .0
-                    .iter()
-                    .filter(|(k, _)| !matches!(k.to_ascii_lowercase().as_str(), "targetname" | "hammerid" | "origin" | "angles"))
-                    .map(|(k, v)| format!("\n  {k} = {v}"))
-                    .collect();
-                let outputs = format!("{keyvalues}{outputs}");
-                format!(
-                    "\nSelected ({id}) {} [{}] HammerId {}\n  origin {:.0} {:.0} {:.0}  angles {:.0} {:.0} {:.0}{outputs}",
-                    e.me.targetname,
-                    e.me.classname,
-                    e.me.kv("hammerid").unwrap_or("-"),
-                    o.x, o.y, o.z, a.x, a.y, a.z
-                )
-            }
-            _ => "\nNothing selected (RMB)".into(),
-        };
-        format!(
-            "EDIT WORLD   {}\nModel [ ]: {model}{search}{selected}\nLMB place  RMB select  Enter edit  arrows/PgUp/PgDn move  Q/E rotate  Del  Ctrl+D  F5 play  F6 save  F7 load",
-            editor.status
-        )
-    } else {
-        String::new()
-    };
-    match panel.iter_mut().next() {
-        Some((mut t, mut node)) => {
-            if t.0 != text {
-                t.0 = text;
-            }
-            node.display = if show { Display::Flex } else { Display::None };
-        }
-        None => {
-            let Some(hud) = hud.iter().next() else { return };
-            commands.spawn((
-                Text::new(text),
-                TextFont { font_size: FontSize::Px(13.), ..default() },
-                TextColor(Color::srgb(1., 0.92, 0.7)),
-                BackgroundColor(Color::srgba(0., 0., 0., 0.55)),
-                Node { position_type: PositionType::Absolute, left: px(8.), bottom: px(120.), padding: UiRect::all(px(6.)), ..default() },
-                GlobalZIndex(145),
-                UiTargetCamera(hud),
-                Overlay,
-            ));
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -661,6 +700,8 @@ mod tests {
         let pd = logic.world.create_entity("point_clientcommand", &kv(&[("targetname", "PD1"), ("hammerid", "1002")]), l4d2r_math::Vec3::ZERO, l4d2r_math::Vec3::ZERO, None);
         let text = export(&logic, &[crate_id, pd], "c2m4_barns");
         assert!(text.contains("prop_dynamic_create props_urban/fence_cover001_128;"), "{text}");
+        // Re-running the script replaces its earlier objects.
+        assert!(text.find("ent_fire l4d2r_edit_* kill;") < text.find("prop_dynamic_create"), "{text}");
         assert!(text.contains("ent_fire prop_dynamic addoutput \"HammerId 1001\";"), "{text}");
         assert!(text.contains("ent_keyvalue 1001 \"TargetName\" \"crate1\""), "{text}");
         assert!(text.contains("\"origin\" \"-4300 2500 -250\""), "{text}");

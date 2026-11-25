@@ -99,6 +99,29 @@ fn to_native(v: SourcePrepassOutput) -> prepass_io::VertexOutput {
 }
 
 #import bevy_render::bindless::{bindless_samplers_filtering, bindless_textures_2d}
+#import "shaders/source_uniform.wgsl"::source_uniform
+
+// The same per-map globals as source_lighting.wgsl (native_fog::sky_globals,
+// reserved last slot). The prepass must clip at the world farz too: a far
+// tree discarded only in the main pass kept its prepass depth, hid the 3D
+// skybox behind it, and showed as a blue sky-coloured silhouette (c4m2).
+struct SourceLight {
+    cube: array<vec4<f32>, 6>,
+    sun_direction: vec4<f32>,
+    sun_color: vec4<f32>,
+}
+@group(#{MATERIAL_BIND_GROUP}) @binding(107) var<storage, read> lighting_table: array<SourceLight>;
+fn source_far_clip(world_position: vec3<f32>) {
+    let far_clip = lighting_table[4095u].cube[2];
+    let view_distance = length(world_position - view.world_position.xyz);
+    if source_uniform.settings.w > 0.5 {
+        if far_clip.y > 0.5 && far_clip.x > 0.0 && view_distance < far_clip.x + far_clip.z {
+            discard;
+        }
+    } else if source_uniform.settings.z < 0.5 && far_clip.x > 0.0 && view_distance > far_clip.x {
+        discard;
+    }
+}
 
 #ifdef MESHLET_MESH_MATERIAL_PASS
 #import bevy_pbr::meshlet_visibility_buffer_resolve::resolve_vertex_output
@@ -142,6 +165,7 @@ fn fragment(
     pbr_functions::visibility_range_dither(in.position, in.visibility_range_dither);
 #endif  // VISIBILITY_RANGE_DITHER
 
+    source_far_clip(in.world_position.xyz);
     pbr_prepass_functions::prepass_alpha_discard(in);
 #endif  // MESHLET_MESH_MATERIAL_PASS
 
@@ -242,6 +266,7 @@ fn fragment(wound_in: SourcePrepassOutput) {
 #ifdef SOURCE_WOUNDS
     let blood = wound_blood(wound_in.wound_uv0, wound_in.wound_uv1, wound_in.wound_clip);
 #endif
+    source_far_clip(in.world_position.xyz);
     pbr_prepass_functions::prepass_alpha_discard(in);
 }
 #endif // PREPASS_FRAGMENT

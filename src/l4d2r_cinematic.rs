@@ -130,7 +130,8 @@ impl MapLogic {
                 return Err(io::Error::other("Trigger has no brush bounds"));
             };
             let mat = self.world.world_matrix(id);
-            let model = e.me.brush.unwrap();
+            // Box triggers (EDIT WORLD) have no brush to verify.
+            let Some(model) = e.me.brush else { continue };
             let outside = hi + Vec3::splat(10.);
             if collision.overlaps_model(model, mat, outside, 0.01) {
                 return Err(io::Error::other("Trigger overlap leaks beyond bounds"));
@@ -1403,7 +1404,9 @@ pub fn tick(
                     _ => false,
                 };
             let matrix = logic.world.world_matrix(id);
-            let model = e.me.brush.unwrap();
+            // EDIT WORLD box triggers have no brush model: their mins/maxs
+            // box (prop_bounds, tested by `nearby`) is the whole volume.
+            let model = e.me.brush;
             let allowed = logic.accepts_survivor(id);
             let bounds = logic.bounds(id);
             let nearby = |p: Vec3| {
@@ -1424,7 +1427,7 @@ pub fn tick(
                     enabled
                         && allowed
                         && nearby(*p)
-                        && collision.overlaps_model(model, matrix, *p, crate::collision::HEIGHT)
+                        && model.is_none_or(|model| collision.overlaps_model(model, matrix, *p, crate::collision::HEIGHT))
                 })
                 .collect::<Vec<_>>();
             let touched = !touching.is_empty();
@@ -1481,12 +1484,12 @@ pub fn tick(
                     for (transform, mut enemy) in &mut infected {
                         if enemy.health > 0.
                             && nearby(transform.translation)
-                            && collision.overlaps_model(
+                            && model.is_none_or(|model| collision.overlaps_model(
                                 model,
                                 matrix,
                                 transform.translation,
                                 crate::collision::HEIGHT,
-                            )
+                            ))
                         {
                             enemy.health -= damage * 0.5;
                             if burns {
@@ -1547,12 +1550,12 @@ pub fn tick(
                     .as_ref()
                     .and_then(|body| {
                         if !touched
-                            || !collision.overlaps_model(
+                            || !model.is_none_or(|model| collision.overlaps_model(
                                 model,
                                 matrix,
                                 body.feet,
                                 crate::collision::HEIGHT,
-                            )
+                            ))
                         {
                             return None;
                         }
@@ -2131,6 +2134,37 @@ fn set_camera_fov(projection: &mut Mut<'_, Projection>, fov: f32) {
 #[cfg(test)]
 mod trigger_tests {
     use super::*;
+    #[test]
+    fn c5m2_ceda_trailer_exit_unlocks_once_all_inside_with_the_door_closed() {
+        // logic_branch_listener: entrance closed + entire team inside ->
+        // OnAllTrue -> finale_cleanse_exit_door Unlock; anyone leaving locks
+        // it again (OnMixed).
+        use l4d2r_game_core::entities::Kind;
+        let root = std::path::Path::new(r"C:\Program Files (x86)\Steam\steamapps\common\Left 4 Dead 2");
+        if !root.exists() {
+            return;
+        }
+        let mut logic = MapLogic::load(root, &root.join("left4dead2/maps/c5m2_park.bsp"), true).unwrap();
+        let pump = |logic: &mut MapLogic| {
+            for _ in 0..30 {
+                logic.world.tick(1. / 60.);
+            }
+        };
+        let exit = logic.world.find("finale_cleanse_exit_door")[0];
+        let locked = |logic: &MapLogic| matches!(&logic.world.ents[exit].kind, Kind::Door(d) if d.locked);
+        assert!(locked(&logic), "the exit starts locked");
+        let closed = logic.world.find("ceda_trailer_doorclosed_branch")[0];
+        let inside = logic.world.find("ceda_trailer_allinside_branch")[0];
+        logic.world.input(closed, "SetValueTest", "1", None, None);
+        pump(&mut logic);
+        assert!(locked(&logic), "door closed but team outside: still locked");
+        logic.world.input(inside, "SetValueTest", "1", None, None);
+        pump(&mut logic);
+        assert!(!locked(&logic), "all inside with the door closed unlocks the exit");
+        logic.world.input(inside, "SetValueTest", "0", None, None);
+        pump(&mut logic);
+        assert!(locked(&logic), "someone leaving locks it again");
+    }
     #[test]
     fn c5m4_parade_float_rolls_to_the_end_of_its_track() {
         use l4d2r_game_core::entities::Kind;

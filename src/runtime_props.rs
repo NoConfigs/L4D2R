@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-type Draws = Vec<(Handle<Mesh>, Handle<crate::viewer::SourceMaterial>)>;
+pub(crate) type Draws = Vec<(Handle<Mesh>, Handle<crate::viewer::SourceMaterial>)>;
 
 #[derive(Resource, Default)]
 pub struct RuntimeModels {
@@ -82,6 +82,25 @@ fn load_model(
         out.push((meshes.add(crate::viewer::mesh(part.positions, Some(part.normals), part.uv, uv)), material));
     }
     Some(out)
+}
+
+/// A model's draws, loaded once and cached with the runtime props' (the
+/// EDIT WORLD ghost and browser preview use them).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draws_for(
+    state: &mut RuntimeModels,
+    assets: &mut crate::source_assets::SourceAssets,
+    path: &str,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<crate::viewer::SourceMaterial>,
+    images: &mut Assets<Image>,
+    lighting: &crate::viewer::LightingTable,
+) -> Option<Draws> {
+    if !state.models.contains_key(path) {
+        let draws = load_model(assets, path, meshes, materials, images, lighting);
+        state.models.insert(path.to_string(), draws);
+    }
+    state.models.get(path).cloned().flatten()
 }
 
 #[allow(clippy::too_many_arguments)]

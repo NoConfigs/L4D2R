@@ -394,6 +394,8 @@ pub(crate) fn execute(
         "noclip"=>{if state.noclip {match collision.supported_spawn_near(body.feet,HEIGHT){Ok(p)=>body.feet=p,Err(_)=>return "Cannot leave noclip inside solid geometry; fly into clear space first.".into()}}state.noclip=!state.noclip;body.velocity=Vec3::ZERO;format!("noclip {}",state.noclip)},
         "flashlight"=>{state.flashlight=!state.flashlight;format!("flashlight {}",state.flashlight)},
         "director_force_panic_event"=>{state.panic=true;"Panic event".into()},
+        "director_stop"=>{crate::game_state::set_director_stopped(true);String::new()},
+        "director_start"=>{crate::game_state::set_director_stopped(false);String::new()},
         "bot_setpos" => {
             let values = words.iter().skip(2).map(|s| s.parse::<f32>()).collect::<Result<Vec<_>, _>>();
             match (words.get(1), values) {

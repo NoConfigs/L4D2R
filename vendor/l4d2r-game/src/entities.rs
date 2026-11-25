@@ -809,6 +809,65 @@ impl EntityWorld {
     }
 
     /// Queue every connection of `ent` named `output`.
+    /// logic_branch_listener: a listened branch changed value, so each
+    /// listener naming it (Branch01..Branch16, `*` wildcards) re-checks all
+    /// its branches. Without this c5m2's CEDA trailer exit door never
+    /// unlocked (OnAllTrue -> finale_cleanse_exit_door Unlock).
+    fn update_branch_listeners(&mut self, branch: usize, activator: Option<usize>) {
+        let name = self.ents[branch].me.targetname.clone();
+        if name.is_empty() {
+            return;
+        }
+        let listeners: Vec<usize> = self
+            .ents
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.alive && e.me.classname == "logic_branch_listener")
+            .filter(|(_, e)| {
+                (1..=16).any(|i| {
+                    e.me.kv(&format!("Branch{i:02}")).is_some_and(|pattern| name_matches(pattern, &name))
+                })
+            })
+            .map(|(i, _)| i)
+            .collect();
+        for listener in listeners {
+            self.evaluate_branch_listener(listener, false, activator);
+        }
+    }
+    /// Fires OnAllTrue / OnAllFalse / OnMixed when the combined state of the
+    /// listener's branches changes (always, for its Test input).
+    fn evaluate_branch_listener(&mut self, listener: usize, force: bool, activator: Option<usize>) {
+        let patterns: Vec<String> = (1..=16)
+            .filter_map(|i| self.ents[listener].me.kv(&format!("Branch{i:02}")).map(str::to_owned))
+            .filter(|p| !p.is_empty())
+            .collect();
+        let values: Vec<bool> = self
+            .ents
+            .iter()
+            .filter(|e| e.alive && patterns.iter().any(|p| name_matches(p, &e.me.targetname)))
+            .filter_map(|e| match e.kind {
+                Kind::Branch { value } => Some(value),
+                _ => None,
+            })
+            .collect();
+        if values.is_empty() {
+            return;
+        }
+        let state = if values.iter().all(|v| *v) {
+            "OnAllTrue"
+        } else if values.iter().all(|v| !*v) {
+            "OnAllFalse"
+        } else {
+            "OnMixed"
+        };
+        let me = &mut self.ents[listener].me;
+        if !force && me.kv("__branch_state") == Some(state) {
+            return;
+        }
+        me.ent.0.retain(|(k, _)| k != "__branch_state");
+        me.ent.0.push(("__branch_state".into(), state.into()));
+        self.fire_output(listener, state, activator);
+    }
     pub fn fire_output(&mut self, ent: usize, output: &str, activator: Option<usize>) {
         self.fire_output_value(ent, output, None, activator);
     }
@@ -971,7 +1030,7 @@ impl EntityWorld {
                         .ents
                         .iter()
                         .enumerate()
-                        .filter(|(_, e)| e.alive && Self::target_class(e).eq_ignore_ascii_case(t))
+                        .filter(|(_, e)| e.alive && name_matches(t, Self::target_class(e)))
                         .map(|(i, _)| i)
                         .collect();
                 }
@@ -1905,6 +1964,10 @@ impl EntityWorld {
             self.fire_output_value(ent, "OutAnger", Some(&v.to_string()), activator);
             return;
         }
+        if class == "logic_branch_listener" && inp == "test" {
+            self.evaluate_branch_listener(ent, true, activator);
+            return;
+        }
         if (class == "point_template" || class == "env_entity_maker") && inp == "forcespawn" {
             self.spawn_template(ent, activator);
             return;
@@ -1986,17 +2049,32 @@ impl EntityWorld {
                 }
             }
             Kind::Branch { value } => match inp.as_str() {
-                "setvalue" => *value = truthy(param),
-                "setvaluetest" => {
+                "setvalue" => {
+                    let old = *value;
                     *value = truthy(param);
-                    let o = if *value { "OnTrue" } else { "OnFalse" };
-                    self.fire_output(ent, o, activator);
+                    if old != *value {
+                        self.update_branch_listeners(ent, activator);
+                    }
                 }
-                "toggle" => *value = !*value,
+                "setvaluetest" => {
+                    let old = *value;
+                    *value = truthy(param);
+                    let new = *value;
+                    let o = if new { "OnTrue" } else { "OnFalse" };
+                    self.fire_output(ent, o, activator);
+                    if old != new {
+                        self.update_branch_listeners(ent, activator);
+                    }
+                }
+                "toggle" => {
+                    *value = !*value;
+                    self.update_branch_listeners(ent, activator);
+                }
                 "toggletest" => {
                     *value = !*value;
                     let o = if *value { "OnTrue" } else { "OnFalse" };
                     self.fire_output(ent, o, activator);
+                    self.update_branch_listeners(ent, activator);
                 }
                 "test" => {
                     let o = if *value { "OnTrue" } else { "OnFalse" };
@@ -2945,3 +3023,12 @@ pub const CAR_ALARM_DURATION: f32 = 15.;
 pub const CAR_ALARM_CHIRP_DISTANCE: f32 = 350.;
 pub const CAR_ALARM_CHIRP_INTERVAL: f32 = 3.;
 pub const CAR_ALARM_CHIRP_DURATION: f32 = 1.;
+
+/// Source entity-name matching: case-insensitive, a trailing `*` matches any
+/// suffix.
+fn name_matches(pattern: &str, name: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => name.len() >= prefix.len() && name[..prefix.len()].eq_ignore_ascii_case(prefix),
+        None => pattern.eq_ignore_ascii_case(name),
+    }
+}

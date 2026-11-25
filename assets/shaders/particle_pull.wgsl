@@ -28,6 +28,10 @@ struct ParticleVertex {
 // 3D-skybox copies (effects.y 3): the sky_camera fog colour, already scaled
 // like the sky meshes' (native_fog::Runtime::sky_color).
 @group(#{MATERIAL_BIND_GROUP}) @binding(110) var<uniform> sky_fog: vec4<f32>;
+// Refract with $basetexture: added over the refraction (particle_pull.rs).
+@group(#{MATERIAL_BIND_GROUP}) @binding(111) var refract_base: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(112) var refract_base_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(113) var<uniform> refract_base_on: f32;
 struct Output {
     @builtin(position) position: vec4<f32>,
     @location(0) current_uv: vec2<f32>,
@@ -100,6 +104,10 @@ fn sprite_color(v: Output) -> vec4<f32> {
             let contrast = 4.0 - 3.0 * clamp(mean * 50.0, 0.0, 1.0);
             let lift = 0.0125 * (1.0 - clamp(mean * 5.0, 0.0, 1.0));
             refracted.g = refracted.g * max(1.0, contrast * noise) + noise * lift;
+        }
+        if refract_base_on > 0.5 {
+            let base = textureSample(refract_base, refract_base_sampler, v.current_uv);
+            refracted += base.rgb * base.a * tint * v.color.a;
         }
         return vec4(refracted, clamp(frame.a * v.color.a, 0.0, 1.0));
     }
