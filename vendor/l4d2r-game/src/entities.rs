@@ -412,6 +412,9 @@ pub struct Cine {
     pub scene_starts: Vec<usize>,
     pub director_commands: Vec<(String, String)>,
     pub script_commands: Vec<ScriptRequest>,
+    /// point_clientcommand `Command` (and player-targeted AddOutput origin /
+    /// angles): console lines the game runs for the local player.
+    pub client_commands: Vec<String>,
 }
 #[derive(Clone, Debug)]
 pub struct ScriptRequest {
@@ -1105,6 +1108,32 @@ impl EntityWorld {
                 self.cine.concepts.push((Some(who), p.param.trim().to_string()));
                 continue;
             }
+            // AddOutput "origin x y z" / "angles p y r" on the local player
+            // (!activator with no entity activator, or !player): testscripts
+            // teleport the shooter this way (bmap.txt's vending machines).
+            if p.input.eq_ignore_ascii_case("AddOutput")
+                && (p.target.eq_ignore_ascii_case("!player")
+                    || (p.target.eq_ignore_ascii_case("!activator") && p.activator.is_none()
+                        && p.actor.is_none_or(|a| a == 0 || a == u64::MAX)))
+            {
+                let mut words = p.param.split_whitespace();
+                match words.next().map(str::to_ascii_lowercase).as_deref() {
+                    Some("origin") => {
+                        let rest: Vec<&str> = words.collect();
+                        if rest.len() == 3 {
+                            self.cine.client_commands.push(format!("setpos {}", rest.join(" ")));
+                        }
+                    }
+                    Some("angles") => {
+                        let rest: Vec<&str> = words.collect();
+                        if rest.len() == 3 {
+                            self.cine.client_commands.push(format!("setang {}", rest.join(" ")));
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             let previous_actor = self.io_actor;
             self.io_actor = p.actor;
             let targets = self.resolve(&p.target, p.activator, p.caller);
@@ -1529,6 +1558,13 @@ impl EntityWorld {
                 return false;
             }
         }
+        // CBaseEntity damage events: OnTakeDamage fires for any entity that
+        // takes the hit, including props with no health (testscript buttons
+        // and bmap.txt's vending machines are plain prop_dynamics). None is
+        // the local player as activator.
+        if self.ents[ent].conns.iter().any(|c| c.output.eq_ignore_ascii_case("OnTakeDamage")) {
+            self.fire_output(ent, "OnTakeDamage", None);
+        }
         if self.ents[ent].me.classname.starts_with("func_breakable")
             && self.ents[ent].me.kv_i32("material") == Some(7) {
             return false; // Native matUnbreakableGlass; explicit Break input remains available.
@@ -1832,6 +1868,14 @@ impl EntityWorld {
             return;
         }
         match (class.as_str(), inp.as_str()) {
+            // Testscripts' PD1: "PD1,Command,give health" runs on the player.
+            ("point_clientcommand" | "point_servercommand" | "point_broadcastclientcommand", "command") => {
+                let line = param.trim();
+                if !line.is_empty() {
+                    self.cine.client_commands.push(line.to_string());
+                }
+                return;
+            }
             ("prop_dynamic" | "prop_dynamic_override", "setanimation") => {
                 self.cine.anims.insert(ent, (param.to_string(), now));
                 return;

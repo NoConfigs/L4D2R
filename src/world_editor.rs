@@ -464,6 +464,90 @@ pub(crate) fn load_last(editor: &mut Editor, logic: &mut crate::l4d2r_cinematic:
     }
 }
 
+/// Where testscripts are listed, saved and recorded (the game's folder
+/// first, as `test_startscript` searches).
+pub(crate) fn script_dir(root: &std::path::Path) -> std::path::PathBuf {
+    crate::source_commands::testscript_dirs(root)
+        .into_iter()
+        .find(|d| d.is_dir())
+        .unwrap_or_else(|| root.join("left4dead2/testscripts"))
+}
+
+const MAP_INDEX: &str = "l4d2r_script_maps.txt";
+
+/// The map each script was last saved or loaded on (`file=map` lines).
+fn map_index(root: &std::path::Path) -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(script_dir(root).join(MAP_INDEX))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| l.split_once('=').map(|(f, m)| (f.trim().to_ascii_lowercase(), m.trim().to_string())))
+        .collect()
+}
+
+fn remember_map(root: &std::path::Path, file: &str, map: &str) {
+    let mut index = map_index(root);
+    index.insert(file.to_ascii_lowercase(), map.to_string());
+    let mut lines: Vec<String> = index.into_iter().map(|(f, m)| format!("{f}={m}")).collect();
+    lines.sort();
+    let dir = script_dir(root);
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join(MAP_INDEX), lines.join("
+") + "
+");
+}
+
+/// A testscript offered by the Load menu.
+#[derive(Clone, Debug)]
+pub(crate) struct Script {
+    pub file: String,
+    /// The map it was made for (an EDIT WORLD header) or last used on.
+    pub map: Option<String>,
+    pub modified: std::time::SystemTime,
+}
+
+/// Every `.txt` / `.vtest` testscript in the testscript folders, newest first.
+pub(crate) fn list_scripts(root: &std::path::Path) -> Vec<Script> {
+    let index = map_index(root);
+    let mut out: Vec<Script> = vec![];
+    for dir in crate::source_commands::testscript_dirs(root) {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file = entry.file_name().to_string_lossy().into_owned();
+            let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+            if !path.is_file() || !matches!(ext.as_str(), "txt" | "vtest") || file.eq_ignore_ascii_case(MAP_INDEX) {
+                continue;
+            }
+            if out.iter().any(|s| s.file.eq_ignore_ascii_case(&file)) {
+                continue;
+            }
+            // EDIT WORLD saves name their map in the header.
+            let header = std::fs::read_to_string(&path).ok().and_then(|t| {
+                t.lines().take(5).find_map(|l| l.split_once("L4D2R EDIT WORLD - ").map(|(_, m)| m.trim().to_string()))
+            });
+            let map = header.or_else(|| index.get(&file.to_ascii_lowercase()).cloned());
+            let modified = entry.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+            out.push(Script { file, map, modified });
+        }
+    }
+    out.sort_by(|a, b| b.modified.cmp(&a.modified));
+    out
+}
+
+/// Runs `file`, replacing this session's objects, and records the map.
+pub(crate) fn load_file(editor: &mut Editor, logic: &mut crate::l4d2r_cinematic::MapLogic, root: &std::path::Path, file: &str, map: &str) {
+    for id in std::mem::take(&mut editor.objects) {
+        if alive(logic, id) {
+            logic.world.input(id, "Kill", "", None, None);
+        }
+    }
+    editor.selected = None;
+    crate::source_commands::submit(&format!("test_startscript \"{file}\""));
+    remember_map(root, file, map);
+    editor.last_file = Some(file.to_string());
+    editor.status = format!("Loading {file} on {map}");
+}
+
 /// Applies one inspector line to the selected object; returns the status.
 ///
 /// - `key value...`: a keyvalue (`name` is short for targetname;
@@ -553,11 +637,11 @@ pub(crate) fn next_hammer(editor: &mut Editor, logic: &crate::l4d2r_cinematic::M
 pub(crate) fn save(editor: &mut Editor, logic: &crate::l4d2r_cinematic::MapLogic, root: &std::path::Path, map: &str) -> String {
     let text = export(logic, &editor.objects, map);
     let file = format!("edit_{map}.txt");
-    let dir = root.join("left4dead2/testscripts");
-    let dir = if dir.is_dir() { dir } else { std::path::PathBuf::from("testscripts") };
+    let dir = script_dir(root);
     let _ = std::fs::create_dir_all(&dir);
     match std::fs::write(dir.join(&file), text) {
         Ok(()) => {
+            remember_map(root, &file, map);
             editor.last_file = Some(file.clone());
             format!("Saved {} (run: sv_cheats 1; test_startscript {file})", dir.join(&file).display())
         }

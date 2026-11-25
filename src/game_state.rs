@@ -373,6 +373,9 @@ pub fn set_director_stopped(stopped: bool) {
 /// applied by the bot update: matched parity captures need bots on exact
 /// spots.
 /// Retail `kick <survivor>`: queued names, applied by the bot loop.
+/// `l4d2r_damage <name|hammerid> [amount]`: debug bullet damage to an entity
+/// (fires its OnTakeDamage like a shot; for testing testscripts).
+pub static DAMAGE_REQUESTS: std::sync::Mutex<Vec<(String, f32)>> = std::sync::Mutex::new(Vec::new());
 pub static KICKS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 /// Squad slots removed by `kick` (bit per index). A kicked bot is dead to
 /// every system and is not drawn, shown on the HUD or defibrillated; a

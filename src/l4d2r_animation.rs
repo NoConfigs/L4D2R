@@ -1739,6 +1739,19 @@ impl AnimationLibrary {
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     }
+    /// Loads a prop model's skeleton and draws on first use, so a prop made at
+    /// runtime (`prop_dynamic_create`, testscripts) can SetAnimation like a
+    /// map prop (bmap.txt's jukebox: "jukeeey2,setanimation,diskspin").
+    pub(crate) fn ensure_model(&mut self, assets: &mut SourceAssets, path: &str) {
+        if self.models.contains_key(path) {
+            return;
+        }
+        let assets = RefCell::new(assets);
+        let Ok(skeleton) = Skeleton::load_with(path, |p| assets.borrow_mut().read(p).ok()) else { return };
+        let Ok(parts) = crate::studio::load(&mut assets.borrow_mut(), path, 0, 0) else { return };
+        let draws = parts.into_iter().map(|d| draw_bind(d, &skeleton)).collect();
+        self.models.insert(path.to_string(), Model { skeleton, draws, physics: None }.into());
+    }
     pub fn load(
         root: &Path,
         actors: &[String],

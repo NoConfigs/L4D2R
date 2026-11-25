@@ -397,6 +397,14 @@ pub(crate) fn execute(
         "edit_world"=>{crate::world_editor::request_open();state.open=false;"Opening EDIT WORLD (single-player campaign, sv_cheats 1)".into()},
         "director_stop"=>{crate::game_state::set_director_stopped(true);String::new()},
         "director_start"=>{crate::game_state::set_director_stopped(false);String::new()},
+        "l4d2r_damage" => match words.get(1) {
+            Some(target) => {
+                let amount = words.get(2).and_then(|v| v.parse::<f32>().ok()).unwrap_or(10.);
+                crate::game_state::DAMAGE_REQUESTS.lock().unwrap().push((target.to_string(), amount));
+                format!("l4d2r_damage {target} {amount}")
+            }
+            None => "Usage: l4d2r_damage <targetname|hammerid> [amount]".into(),
+        },
         "kick" => match words.get(1).map(|n| n.to_ascii_lowercase()) {
             Some(name) if matches!(name.as_str(), "nick" | "rochelle" | "coach" | "ellis" | "bill" | "zoey" | "louis" | "francis") => {
                 crate::game_state::KICKS.lock().unwrap().push(name);

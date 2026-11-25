@@ -4018,6 +4018,20 @@ fn director(
             }
         }
         native.run_thinks(&logic.world);
+        // point_clientcommand `Command` and player AddOutput origin/angles:
+        // run as the local player's console lines (testscripts' PD1).
+        for (target, amount) in std::mem::take(&mut *crate::game_state::DAMAGE_REQUESTS.lock().unwrap()) {
+            let mut ids = logic.world.find(&target);
+            if ids.is_empty() {
+                ids = logic.world.find_hammer_id(&target);
+            }
+            for id in ids {
+                logic.world.damage_entity(id, amount, l4d2r_game_core::entities::DamageKind::Bullet);
+            }
+        }
+        for line in std::mem::take(&mut logic.world.cine.client_commands) {
+            crate::source_commands::submit(&line);
+        }
         for (input, param) in std::mem::take(&mut logic.world.cine.director_commands) {
             native.command(&input, &param);
             if matches!(

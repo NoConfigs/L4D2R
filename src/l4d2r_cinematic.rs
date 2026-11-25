@@ -962,7 +962,10 @@ impl MapLogic {
             .filter(|(id, e)| {
                 e.alive
                     && (self.world.durability.contains_key(id)
-                        || matches!(e.kind, l4d2r_game_core::entities::Kind::Breakable { .. }))
+                        || matches!(e.kind, l4d2r_game_core::entities::Kind::Breakable { .. })
+                        // Unbreakable props still take damage events
+                        // (testscript buttons: OnTakeDamage).
+                        || e.conns.iter().any(|c| c.output.eq_ignore_ascii_case("OnTakeDamage")))
             })
             .filter_map(|(id, _)| {
                 let distance = self.breakable_hit_distance(id, eye, forward, range)?;

@@ -95,6 +95,10 @@ enum Drag {
 
 #[derive(Resource, Default)]
 struct UiState {
+    /// The Load menu: open, its scripts, and whether its rows need rebuilding.
+    load_open: bool,
+    load_list: Vec<world_editor::Script>,
+    load_dirty: bool,
     tab: Tab,
     tool: Tool,
     filter: String,
@@ -124,6 +128,10 @@ struct UiState {
 
 #[derive(Component)]
 struct EditRoot;
+#[derive(Component)]
+struct LoadPanel;
+#[derive(Component)]
+struct LoadList;
 /// Panels the cursor can be over (world clicks are ignored there).
 #[derive(Component)]
 struct Panel;
@@ -179,13 +187,17 @@ enum Act {
     DelOut(usize),
     GiveHealth,
     GiveWeapon,
+    /// Load menu: run script n of the list, close, open the folder.
+    LoadPick(usize),
+    LoadClose,
+    LoadFolder,
 }
 
 pub fn install(app: &mut App) {
     app.add_systems(Startup, gizmo_style);
     app.init_resource::<UiState>().add_systems(
         Update,
-        (setup, show, fps_below_toolbar, buttons, browser, properties, fields, world, draw, ghost, preview)
+        (setup, show, fps_below_toolbar, buttons, load_menu, browser, properties, fields, world, draw, ghost, preview)
             .chain()
             .after(crate::game_menu::update),
     );
@@ -341,6 +353,35 @@ fn setup(mut commands: Commands, roots: Query<(), With<EditRoot>>, camera: Query
     button(&mut commands, bar, "Stop placing", Act::StopPlacing, 104.);
     let status = text(&mut commands, bar, "", 13., DIM);
     commands.entity(status).insert((StatusText, Node { margin: UiRect::left(px(14.)), flex_shrink: 0., ..default() }, TextLayout::default().with_no_wrap()));
+    // Load menu (hidden until Load is pressed).
+    let load = commands
+        .spawn((
+            Panel,
+            LoadPanel,
+            RelativeCursorPosition::default(),
+            Node {
+                position_type: PositionType::Absolute,
+                left: percent(30.),
+                top: px(60.),
+                width: percent(40.),
+                max_height: percent(80.),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect::all(px(8.)),
+                display: Display::None,
+                overflow: Overflow::clip(),
+                ..default()
+            },
+            BackgroundColor(PANEL),
+            GlobalZIndex(95),
+            ChildOf(root),
+        ))
+        .id();
+    text(&mut commands, load, "Load testscript", 15., TEXT);
+    text(&mut commands, load, "Saved and imported scripts (newest first). Map = the map it was made for or last used on.", 11., DIM);
+    commands.spawn((LoadList, Node { flex_direction: FlexDirection::Column, margin: UiRect::vertical(px(6.)), ..default() }, ChildOf(load)));
+    let footer = commands.spawn((Node { flex_direction: FlexDirection::Row, ..default() }, ChildOf(load))).id();
+    button(&mut commands, footer, "Open folder", Act::LoadFolder, 96.);
+    button(&mut commands, footer, "Close", Act::LoadClose, 64.);
     // Browser.
     let browser = commands
         .spawn((
@@ -560,7 +601,28 @@ fn buttons(
                     editor.status = world_editor::save(&mut editor, &logic, &root.0, &map);
                 }
             }
-            Act::Load => world_editor::load_last(&mut editor, &mut logic),
+            Act::Load => {
+                ui.load_open = !ui.load_open;
+                ui.load_dirty = ui.load_open;
+            }
+            Act::LoadClose => ui.load_open = false,
+            Act::LoadFolder => {
+                if let Some(root) = root.as_ref() {
+                    let dir = world_editor::script_dir(&root.0);
+                    let _ = std::fs::create_dir_all(&dir);
+                    #[cfg(windows)]
+                    let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+                    editor.status = format!("Put testscripts in {}", dir.display());
+                }
+                ui.load_dirty = true;
+            }
+            Act::LoadPick(i) => {
+                if let (Some(script), Some(root)) = (ui.load_list.get(i).cloned(), root.as_ref()) {
+                    let map = settings.as_ref().and_then(|s| s.map.file_stem()).map_or("map".to_string(), |m| m.to_string_lossy().into_owned());
+                    world_editor::load_file(&mut editor, &mut logic, &root.0, &script.file, &map);
+                }
+                ui.load_open = false;
+            }
             Act::GridDown => editor.grid = (editor.grid() / 2.).max(1.),
             Act::GridUp => editor.grid = (editor.grid() * 2.).min(256.),
             Act::ToolMove => ui.tool = Tool::Move,
@@ -1507,5 +1569,62 @@ fn preview(
     let spin = Quat::from_rotation_y(time.elapsed_secs() * 0.6);
     for mut t in &mut pivots {
         t.rotation = spin;
+    }
+}
+
+/// Shows the Load menu and rebuilds its rows when it opens: one button per
+/// testscript, with the map it belongs to (current map highlighted).
+fn load_menu(
+    mut commands: Commands,
+    mut ui: ResMut<UiState>,
+    editor: Res<Editor>,
+    root: Option<Res<crate::game_ui::HudSource>>,
+    settings: Option<Res<crate::campaign_settings::SessionSettings>>,
+    mut panels: Query<&mut Node, With<LoadPanel>>,
+    lists: Query<(Entity, Option<&Children>), With<LoadList>>,
+) {
+    let open = ui.load_open && editor.editing;
+    for mut node in &mut panels {
+        let d = if open { Display::Flex } else { Display::None };
+        if node.display != d {
+            node.display = d;
+        }
+    }
+    if !open || !ui.load_dirty {
+        return;
+    }
+    ui.load_dirty = false;
+    let Some(root) = root else { return };
+    ui.load_list = world_editor::list_scripts(&root.0);
+    let current = settings.as_ref().and_then(|s| s.map.file_stem()).map(|m| m.to_string_lossy().to_ascii_lowercase());
+    for (list, children) in &lists {
+        for child in children.into_iter().flatten() {
+            commands.entity(*child).despawn();
+        }
+        if ui.load_list.is_empty() {
+            text(&mut commands, list, "No testscripts yet: Save (F6), or put .txt scripts in the folder.", 12., DIM);
+        }
+        for (i, script) in ui.load_list.iter().enumerate().take(40) {
+            let here = script.map.as_ref().is_some_and(|m| Some(m.to_ascii_lowercase()) == current);
+            let map = script.map.clone().unwrap_or_else(|| "map unknown".into());
+            let label = format!("{}   -   {}{}", script.file, map, if here { "  (this map)" } else { "" });
+            let row = commands
+                .spawn((
+                    Button,
+                    Act::LoadPick(i),
+                    Node {
+                        min_height: px(24.),
+                        margin: UiRect::vertical(px(1.)),
+                        padding: UiRect::horizontal(px(6.)),
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    BackgroundColor(BUTTON),
+                    ChildOf(list),
+                ))
+                .id();
+            let t = text(&mut commands, row, &label, 13., if here { Color::srgb(0.6, 0.95, 0.6) } else { TEXT });
+            commands.entity(t).insert(TextLayout::default().with_no_wrap());
+        }
     }
 }

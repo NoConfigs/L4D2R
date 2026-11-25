@@ -16,10 +16,13 @@ pub struct RuntimeModels {
     /// Entities waiting for their draws, and those already drawn.
     pending: Vec<usize>,
     drawn: HashMap<usize, Vec<Entity>>,
+    /// rendercolor applied to each drawn prop.
+    tints: HashMap<usize, [u8; 3]>,
 }
 
 pub fn install(app: &mut App) {
-    app.init_resource::<RuntimeModels>().add_systems(Update, present.after(crate::game_menu::update));
+    app.init_resource::<RuntimeModels>()
+        .add_systems(Update, (present, tint).chain().after(crate::game_menu::update));
 }
 
 fn texture(assets: &mut crate::source_assets::SourceAssets, images: &mut Assets<Image>, path: &str, srgb: bool) -> Option<Handle<Image>> {
@@ -114,12 +117,14 @@ fn present(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<crate::viewer::SourceMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    mut library: Option<ResMut<crate::l4d2r_animation::AnimationLibrary>>,
 ) {
     let Some(mut logic) = logic else { return };
     state.pending.extend(std::mem::take(&mut *crate::dev_console::SPAWNED.lock().unwrap()));
     // Killed entities lose their draws.
     let dead: Vec<usize> = state.drawn.keys().copied().filter(|id| !logic.world.ents.get(*id).is_some_and(|e| e.alive)).collect();
     for id in dead {
+        state.tints.remove(&id);
         for e in state.drawn.remove(&id).unwrap_or_default() {
             commands.entity(e).try_despawn();
         }
@@ -153,19 +158,29 @@ fn present(
         synced = true;
         let Some(Some(draws)) = state.models.get(&model).cloned() else { continue };
         let transform = crate::l4d2r_cinematic::transform(logic.world.world_matrix(id));
+        // Dynamic props animate on SetAnimation like map props do.
+        let animated = logic.world.ents[id].me.classname.starts_with("prop_dynamic");
+        if animated {
+            if let Some(library) = library.as_mut() {
+                library.ensure_model(&mut assets, &model);
+            }
+        }
         let spawned = draws
             .iter()
-            .map(|(mesh, material)| {
-                commands
-                    .spawn((
-                        crate::l4d2r_cinematic::MapEntity(id),
-                        Mesh3d(mesh.clone()),
-                        MeshMaterial3d(material.clone()),
-                        Visibility::Inherited,
-                        transform,
-                        crate::viewer::DynamicModelLighting::default(),
-                    ))
-                    .id()
+            .enumerate()
+            .map(|(draw, (mesh, material))| {
+                let mut e = commands.spawn((
+                    crate::l4d2r_cinematic::MapEntity(id),
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(material.clone()),
+                    Visibility::Inherited,
+                    transform,
+                    crate::viewer::DynamicModelLighting::default(),
+                ));
+                if animated {
+                    e.insert(crate::l4d2r_cinematic::ScriptedDraw { model: model.clone(), draw, ent: id });
+                }
+                e.id()
             })
             .collect();
         println!("Runtime prop {id} {model} at {:?}", logic.world.ents[id].me.origin);
@@ -175,5 +190,53 @@ fn present(
         if let Some(collision) = collision {
             collision.sync_entities(&logic);
         }
+    }
+}
+
+/// `rendercolor` on runtime props (testscripts set it with ent_keyvalue after
+/// the prop is made: bmap.txt's red/green buttons). The tinted copy becomes
+/// the base the model lighting builds its variants from.
+fn tint(
+    mut state: ResMut<RuntimeModels>,
+    logic: Option<Res<crate::l4d2r_cinematic::MapLogic>>,
+    mut materials: ResMut<Assets<crate::viewer::SourceMaterial>>,
+    mut draws: Query<(&mut MeshMaterial3d<crate::viewer::SourceMaterial>, &mut crate::viewer::DynamicModelLighting)>,
+) {
+    let Some(logic) = logic else { return };
+    let ids: Vec<usize> = state.drawn.keys().copied().collect();
+    for id in ids {
+        let Some(e) = logic.world.ents.get(id).filter(|e| e.alive) else { continue };
+        let want = e.me.kv("rendercolor").map_or([255; 3], |v| {
+            let n: Vec<f32> = v.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+            if n.len() >= 3 { [n[0], n[1], n[2]].map(|c| c.clamp(0., 255.) as u8) } else { [255; 3] }
+        });
+        let applied = state.tints.get(&id).copied().unwrap_or([255; 3]);
+        if applied == want {
+            continue;
+        }
+        let Some(model) = e.me.mdl.clone() else { continue };
+        let Some(Some(originals)) = state.models.get(&model).cloned() else { continue };
+        let entities = state.drawn.get(&id).cloned().unwrap_or_default();
+        for (i, entity) in entities.iter().enumerate() {
+            let Some((_, base)) = originals.get(i) else { continue };
+            let handle = if want == [255; 3] {
+                base.clone()
+            } else {
+                let Some(mut m) = materials.get(base).cloned() else { continue };
+                let c = m.base.base_color.to_linear();
+                m.base.base_color = Color::linear_rgba(
+                    c.red * want[0] as f32 / 255.,
+                    c.green * want[1] as f32 / 255.,
+                    c.blue * want[2] as f32 / 255.,
+                    c.alpha,
+                );
+                materials.add(m)
+            };
+            if let Ok((mut material, mut lighting)) = draws.get_mut(*entity) {
+                material.0 = handle.clone();
+                lighting.set_base(handle);
+            }
+        }
+        state.tints.insert(id, want);
     }
 }

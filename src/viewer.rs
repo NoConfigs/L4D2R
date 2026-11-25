@@ -323,6 +323,13 @@ pub struct DynamicModelLighting {
     slot: Option<u32>,
     appearance: Option<crate::infected_appearance::Appearance>,
 }
+impl DynamicModelLighting {
+    /// Replaces the base material the lit variants are made from (a runtime
+    /// prop's rendercolor tint).
+    pub(crate) fn set_base(&mut self, material: Handle<SourceMaterial>) {
+        self.material = Some(material);
+    }
+}
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum ModelLightingSystems { Write }
 #[derive(Default)]
