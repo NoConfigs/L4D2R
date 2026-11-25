@@ -236,9 +236,10 @@ pub fn update(
         delivery.tick(
             &mut state,
             &mut input,
-            mouse
-                .as_ref()
-                .is_some_and(|buttons| buttons.pressed(MouseButton::Left)),
+            crate::world_editor::edit_cursor().is_none()
+                && mouse
+                    .as_ref()
+                    .is_some_and(|buttons| buttons.pressed(MouseButton::Left)),
             &body,
             logic,
             &collision,

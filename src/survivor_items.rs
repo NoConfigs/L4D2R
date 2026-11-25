@@ -54,9 +54,9 @@ fn target(body: &Body, squad: &Squad, dead: bool, collision: &Collision) -> Opti
         .0
         .iter()
         .enumerate()
-        .filter(|(_, member)| {
+        .filter(|(i, member)| {
             if dead {
-                member.state.dead
+                member.state.dead && !crate::game_state::kicked(*i)
             } else {
                 !member.state.dead
                     && !member.state.incap

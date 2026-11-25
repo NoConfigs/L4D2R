@@ -1885,6 +1885,11 @@ pub fn team_presentation(
                 node.display = display;
             }
         };
+        // A kicked bot has no teammate panel.
+        if crate::game_state::kicked(part.index) {
+            show(&mut node, false);
+            continue;
+        }
         match &part.kind {
             TeamPartKind::Background => show(&mut node, !incap),
             TeamPartKind::IncapBackground => show(&mut node, incap),

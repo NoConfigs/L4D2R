@@ -282,8 +282,10 @@ fn input(
     );
     editor.rmb_down = mouse.pressed(MouseButton::Right);
     LOOK.store(editor.rmb_down, std::sync::atomic::Ordering::Relaxed);
-    mouse.reset(MouseButton::Left);
-    mouse.reset(MouseButton::Right);
+    // The buttons stay as they are: `reset` would also clear "pressed"
+    // until the next physical press, so a held RMB turned the view for one
+    // frame and a held LMB could not drag the move arrows. The game's own
+    // input (game::controls, carryables) ignores the mouse while editing.
     if editor.typing {
         // A UI text field owns the keyboard (edit_world_ui reads the typed
         // characters); WASD must not fly and shortcuts must not fire.
@@ -291,11 +293,10 @@ fn input(
         return;
     }
     typed.clear();
-    if keys.just_pressed(KeyCode::Enter) {
-        editor.command = Some(String::new());
-        keys.reset_all();
-        return;
-    }
+    // (Enter used to open a typed inspector line. Its on-screen overlay is
+    // gone with the panel UI, so the hidden line swallowed every key until
+    // Enter/Escape: "typing works, then nothing types". The properties
+    // panel replaces it.)
     if keys.just_pressed(KeyCode::Escape) && editor.placing.is_some() {
         editor.placing = None;
         editor.status = "Placing cancelled".into();

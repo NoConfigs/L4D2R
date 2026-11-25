@@ -182,12 +182,21 @@ enum Act {
 }
 
 pub fn install(app: &mut App) {
+    app.add_systems(Startup, gizmo_style);
     app.init_resource::<UiState>().add_systems(
         Update,
         (setup, show, fps_below_toolbar, buttons, browser, properties, fields, world, draw, ghost, preview)
             .chain()
             .after(crate::game_menu::update),
     );
+}
+
+/// The editor is the only gizmo user: thicker lines drawn over the world,
+/// so the selection box and arrows stay visible through props and walls.
+fn gizmo_style(mut store: ResMut<GizmoConfigStore>) {
+    let (config, _) = store.config_mut::<DefaultGizmoConfigGroup>();
+    config.line.width = 3.;
+    config.depth_bias = -1.;
 }
 
 fn px_node(left: f32, top: f32, width: f32, height: f32) -> Node {
@@ -213,9 +222,14 @@ fn button(commands: &mut Commands, parent: Entity, label: &str, act: Act, width:
             Button,
             act,
             Node {
-                width: px(width),
+                // Sized by the label (never wrapping); `width` is the least.
+                // Fixed widths wrapped "Rotate -15" onto two lines in a
+                // smaller window.
+                min_width: px(width),
                 height: px(24.),
                 margin: UiRect::all(px(2.)),
+                padding: UiRect::horizontal(px(6.)),
+                flex_shrink: 0.,
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 border: UiRect::all(px(1.)),
@@ -226,7 +240,8 @@ fn button(commands: &mut Commands, parent: Entity, label: &str, act: Act, width:
             ChildOf(parent),
         ))
         .id();
-    text(commands, b, label, 13., TEXT);
+    let t = text(commands, b, label, 13., TEXT);
+    commands.entity(t).insert(TextLayout::default().with_no_wrap());
     b
 }
 
@@ -296,6 +311,7 @@ fn setup(mut commands: Commands, roots: Query<(), With<EditRoot>>, camera: Query
                 flex_direction: FlexDirection::Row,
                 align_items: AlignItems::Center,
                 padding: UiRect::horizontal(px(6.)),
+                overflow: Overflow::clip(),
                 ..default()
             },
             BackgroundColor(PANEL),
@@ -307,13 +323,13 @@ fn setup(mut commands: Commands, roots: Query<(), With<EditRoot>>, camera: Query
     button(&mut commands, bar, "Save (F6)", Act::Save, 84.);
     button(&mut commands, bar, "Load (F7)", Act::Load, 84.);
     let studs = text(&mut commands, bar, "Studs", 13., DIM);
-    commands.entity(studs).insert(Node { margin: UiRect::new(px(22.), px(10.), px(0.), px(0.)), ..default() });
+    commands.entity(studs).insert((Node { margin: UiRect::new(px(22.), px(10.), px(0.), px(0.)), flex_shrink: 0., ..default() }, TextLayout::default().with_no_wrap()));
     button(&mut commands, bar, "-", Act::GridDown, 24.);
     let grid = text(&mut commands, bar, "8", 13., TEXT);
     commands.entity(grid).insert((GridText, Node { margin: UiRect::horizontal(px(8.)), ..default() }));
     button(&mut commands, bar, "+", Act::GridUp, 24.);
     let tool = text(&mut commands, bar, "Tool", 13., DIM);
-    commands.entity(tool).insert(Node { margin: UiRect::new(px(22.), px(10.), px(0.), px(0.)), ..default() });
+    commands.entity(tool).insert((Node { margin: UiRect::new(px(22.), px(10.), px(0.), px(0.)), flex_shrink: 0., ..default() }, TextLayout::default().with_no_wrap()));
     let m = button(&mut commands, bar, "Move", Act::ToolMove, 60.);
     commands.entity(m).insert(Toggle(Act::ToolMove));
     let r = button(&mut commands, bar, "Resize", Act::ToolResize, 60.);
@@ -324,7 +340,7 @@ fn setup(mut commands: Commands, roots: Query<(), With<EditRoot>>, camera: Query
     button(&mut commands, bar, "Delete", Act::Delete, 62.);
     button(&mut commands, bar, "Stop placing", Act::StopPlacing, 104.);
     let status = text(&mut commands, bar, "", 13., DIM);
-    commands.entity(status).insert((StatusText, Node { margin: UiRect::left(px(14.)), ..default() }));
+    commands.entity(status).insert((StatusText, Node { margin: UiRect::left(px(14.)), flex_shrink: 0., ..default() }, TextLayout::default().with_no_wrap()));
     // Browser.
     let browser = commands
         .spawn((
@@ -1271,7 +1287,11 @@ fn draw(editor: Res<Editor>, ui: Res<UiState>, logic: Option<Res<crate::l4d2r_ci
     let Some(id) = editor.selected.filter(|&id| logic.world.ents.get(id).is_some_and(|e| e.alive)) else { return };
     let e = &logic.world.ents[id];
     if let Some((lo, hi)) = logic.bounds(id) {
-        gizmos.cube(Transform::from_translation((lo + hi) * 0.5).with_scale(hi - lo + Vec3::splat(0.02)), Color::srgb(1., 1., 0.3));
+        // Bright (HDR, so exposure does not dim it) and doubled so it reads
+        // against any background.
+        let bright = Color::linear_rgb(4., 3.6, 0.6);
+        gizmos.cube(Transform::from_translation((lo + hi) * 0.5).with_scale(hi - lo + Vec3::splat(0.02)), bright);
+        gizmos.cube(Transform::from_translation((lo + hi) * 0.5).with_scale(hi - lo + Vec3::splat(0.06)), Color::linear_rgb(2., 1.8, 0.3));
     }
     let o = e.me.origin;
     let length_m = (gt.translation().distance(to_bevy(o)) * 0.15).clamp(0.4, 4.);

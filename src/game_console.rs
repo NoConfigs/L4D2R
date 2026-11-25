@@ -397,6 +397,15 @@ pub(crate) fn execute(
         "edit_world"=>{crate::world_editor::request_open();state.open=false;"Opening EDIT WORLD (single-player campaign, sv_cheats 1)".into()},
         "director_stop"=>{crate::game_state::set_director_stopped(true);String::new()},
         "director_start"=>{crate::game_state::set_director_stopped(false);String::new()},
+        "kick" => match words.get(1).map(|n| n.to_ascii_lowercase()) {
+            Some(name) if matches!(name.as_str(), "nick" | "rochelle" | "coach" | "ellis" | "bill" | "zoey" | "louis" | "francis") => {
+                crate::game_state::KICKS.lock().unwrap().push(name);
+                String::new()
+            }
+            // Retail wording for a name that is not playing.
+            Some(_) => format!("Can't kick \"{}\", name not found", words.get(1).copied().unwrap_or("")),
+            None => "Usage:  kick < name >".into(),
+        },
         "bot_setpos" => {
             let values = words.iter().skip(2).map(|s| s.parse::<f32>()).collect::<Result<Vec<_>, _>>();
             match (words.get(1), values) {

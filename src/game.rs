@@ -1245,6 +1245,8 @@ pub(crate) fn prepare(
     if std::env::args().any(|a| a == "--capture-reload") {
         initial.begin_reload(weapons.get(&initial.gun().class).unwrap_or(&pistol));
     }
+    // A new map brings back any survivor bot removed with `kick`.
+    crate::game_state::clear_kicked();
     Ok(Some(Prepared {
         session,
         catalog,
@@ -2264,6 +2266,7 @@ pub(crate) fn controls(
                     .insert(Visibility::Inherited);
             }
         }
+        crate::game_state::clear_kicked();
         for member in &mut squad.0 {
             member.state = Match::new(&rules.pistol);
             member.position = member.spawn;
@@ -2349,6 +2352,15 @@ pub(crate) fn controls(
     if !changed && !capture_changed && edit_cursor != Some(false) {
         body.yaw -= motion.delta.x * 0.002;
         body.pitch = (body.pitch - motion.delta.y * 0.002).clamp(-1.5, 1.5);
+    }
+    // EDIT WORLD is a spectator camera: only the look above (RMB held) and
+    // noclip flying (move_player's WASD). No firing, shoving, use, reload,
+    // slot keys or mouse-wheel weapon switching (the wheel scrolls the
+    // editor's browser).
+    if edit_cursor.is_some() {
+        *wheel_remainder = 0.;
+        *input = Input::default();
+        return;
     }
     input.sample_primary(
         mouse.pressed(MouseButton::Left) && !start,
@@ -5052,6 +5064,21 @@ fn squad_ai(
             crate::ai_ladder::capture_bot(&mut bot_ladders, &c, member, index);
         }
         member.state.ladder_pose = None;
+        {
+            // kick <survivor>: the bot leaves the game.
+            let mut kicks = crate::game_state::KICKS.lock().unwrap();
+            let character = |n: &str| match n {
+                "rochelle" => "producer", "coach" => "coach", "nick" => "gambler", "ellis" => "mechanic",
+                "bill" => "namvet", "zoey" => "teenangst", "louis" => "manager", "francis" => "biker", _ => "",
+            };
+            if let Some(i) = kicks.iter().position(|n| !character(n).is_empty() && member.model.contains(character(n))) {
+                kicks.remove(i);
+                member.state.dead = true;
+                member.state.incap = false;
+                member.state.health = 0.;
+                crate::game_state::set_kicked(index);
+            }
+        }
         if member.state.dead || member.state.pinned || member.state.incap {
             bot_ladders.cancel(index as u64);
         }

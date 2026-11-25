@@ -372,6 +372,23 @@ pub fn set_director_stopped(stopped: bool) {
 /// `bot_setpos <survivor> x y z [yaw]` requests (Source units/degrees),
 /// applied by the bot update: matched parity captures need bots on exact
 /// spots.
+/// Retail `kick <survivor>`: queued names, applied by the bot loop.
+pub static KICKS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// Squad slots removed by `kick` (bit per index). A kicked bot is dead to
+/// every system and is not drawn, shown on the HUD or defibrillated; a
+/// restart or the next chapter brings the team back (retail repopulates).
+static KICKED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub fn kicked(index: usize) -> bool {
+    index < 32 && KICKED.load(std::sync::atomic::Ordering::Relaxed) & (1 << index) != 0
+}
+pub fn set_kicked(index: usize) {
+    if index < 32 {
+        KICKED.fetch_or(1 << index, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+pub fn clear_kicked() {
+    KICKED.store(0, std::sync::atomic::Ordering::Relaxed);
+}
 pub static BOT_PLACEMENTS: std::sync::Mutex<Vec<(String, [f32; 3], f32)>> = std::sync::Mutex::new(Vec::new());
 #[cfg(not(test))]
 pub fn set_bots_stopped(stopped: bool) {

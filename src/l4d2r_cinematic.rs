@@ -1883,7 +1883,7 @@ pub fn presentation(
         ),
     >,
     mut companions: Query<
-        &mut Visibility,
+        (&crate::game::CompanionActor, &mut Visibility),
         (
             With<crate::game::CompanionActor>,
             Without<IntroDraw>,
@@ -1903,8 +1903,8 @@ pub fn presentation(
     }
     let hide_capture_bots = std::env::args().any(|a| a == "--capture-game")
         && std::env::args().any(|a| a == "--capture-no-bots");
-    for mut visible in &mut companions {
-        visible.set_if_neq(if logic.active || hide_capture_bots {
+    for (actor, mut visible) in &mut companions {
+        visible.set_if_neq(if logic.active || hide_capture_bots || crate::game_state::kicked(actor.0) {
             Visibility::Hidden
         } else {
             Visibility::Inherited
