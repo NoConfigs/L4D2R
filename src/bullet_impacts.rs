@@ -29,6 +29,8 @@ pub struct BloodHit {
     pub direction: Vec3,
     pub shotgun: bool,
 }
+/// Set by `r_cleardecals`; the next update removes the decals.
+pub static CLEAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[derive(Resource, Default)]
 pub struct Impacts {
     /// Bullet holes to place: (position, surface normal, game material).
@@ -499,6 +501,12 @@ pub fn update(
 ) {
     if !frontend.playing() || state.paused {
         return;
+    }
+    // r_cleardecals: remove every bullet hole and blood decal.
+    if CLEAR.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        for e in impacts.live.drain(..) {
+            commands.entity(e).try_despawn();
+        }
     }
     let now = logic.world.time;
     impacts.blood_clock.retain(|(id, until)| {

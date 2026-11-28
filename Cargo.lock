@@ -3326,11 +3326,13 @@ dependencies = [
  "bevy",
  "bevy_ecs",
  "cc",
+ "cpal",
  "crc32fast",
  "glam 0.30.10",
  "half",
  "l4d2-formats",
  "l4d2r-game-core",
+ "l4d2r-xbox-link",
  "mimalloc",
  "serde_json",
  "steamworks",
@@ -3343,6 +3345,13 @@ version = "0.1.0"
 dependencies = [
  "glam 0.30.10",
  "l4d2-formats",
+]
+
+[[package]]
+name = "l4d2r-xbox-link"
+version = "0.1.0"
+dependencies = [
+ "num-bigint",
 ]
 
 [[package]]

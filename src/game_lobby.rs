@@ -617,19 +617,21 @@ pub(crate) fn presentation(
     // Retail order (LobbyDetailsSummary): access, "Campaign - <difficulty>"
     // (L4D360UI_Difficulty_*_coop), campaign, chapter ("1: Hotel"), server
     // type (L4D360UI_Lobby_ServerType_Listen).
+    let survival = frontend.mode == crate::survival::MODE_INDEX;
+    let xbox = crate::xbox_link::in_xbox_lobby();
     let summary = [
-        lobby.access.label().to_string(),
-        format!("Campaign - {}", sel.difficulty.name()),
+        if xbox { "System Link Game".to_string() } else { lobby.access.label().to_string() },
+        if survival { "Survival".to_string() } else { format!("Campaign - {}", sel.difficulty.name()) },
         c.name.clone(),
         ch.name.clone(),
-        "Hosting Local Server".to_string(),
+        if xbox { String::new() } else { "Hosting Local Server".to_string() },
     ];
     let leader = if lobby.leader.is_empty() { me.clone() } else { lobby.leader.clone() };
     let shown: Vec<&ChatLine> = lobby.chat.lines.iter().rev().take(CHAT_LINES).collect();
     for (mut text, field, slot, chat, input, choice) in &mut texts {
         let value = if let Some(field) = field {
             match field.0 {
-                TITLE => "CAMPAIGN LOBBY".to_string(),
+                TITLE => if survival { "SURVIVAL LOBBY" } else { "CAMPAIGN LOBBY" }.to_string(),
                 LEADER => format!("Lobby Leader: {leader}"),
                 n => summary.get((n - SUMMARY) as usize).cloned().unwrap_or_default(),
             }

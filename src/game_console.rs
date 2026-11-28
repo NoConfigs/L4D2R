@@ -397,6 +397,31 @@ pub(crate) fn execute(
         "edit_world"=>{crate::world_editor::request_open();state.open=false;"Opening EDIT WORLD (single-player campaign, sv_cheats 1)".into()},
         "director_stop"=>{crate::game_state::set_director_stopped(true);String::new()},
         "director_start"=>{crate::game_state::set_director_stopped(false);String::new()},
+        // Housekeeping lines testscripts broadcast on a timer (bmap.txt's Bcc:
+        // revive, respawn, jointeam 2, r_cleardecals, R_DrawOtherModels 1).
+        "revive" => {
+            if game.incap && !game.dead {
+                game.revive();
+            }
+            String::new()
+        }
+        "respawn" => {
+            if game.dead {
+                game.resuscitate();
+            }
+            String::new()
+        }
+        // Solo play is always on the survivor team.
+        "jointeam" => String::new(),
+        "r_cleardecals" => {
+            crate::bullet_impacts::CLEAR.store(true, std::sync::atomic::Ordering::Relaxed);
+            String::new()
+        }
+        // Retail cheat cvar (2 = wireframe); the scripts only reset it to 1.
+        "r_drawothermodels" => match words.get(1) {
+            Some(_) => String::new(),
+            None => "\"r_drawothermodels\" = \"1\"".into(),
+        },
         "l4d2r_damage" => match words.get(1) {
             Some(target) => {
                 let amount = words.get(2).and_then(|v| v.parse::<f32>().ok()).unwrap_or(10.);

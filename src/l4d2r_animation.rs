@@ -1451,6 +1451,10 @@ impl AnimationLibrary {
             })
             .unwrap_or(0)
     }
+    /// Activity name of every sequence of `path`, by sequence index (None if not loaded).
+    pub fn sequence_activities(&self, path: &str) -> Option<Vec<String>> {
+        self.models.get(path).map(|m| m.skeleton.sequences().iter().map(|s| s.activity_name.clone()).collect())
+    }
     pub fn sequence_names(&self, path: &str) -> Vec<String> {
         self.models
             .get(path)
@@ -4645,7 +4649,7 @@ pub fn update(
                     velocity: p.motion_velocity,
                     aim: member.aim,
                     airborne: member.vertical.abs() > 1.,
-                    crouched: false,
+                    crouched: member.state.remote_crouch,
                     // Retail bots press walk to reposition (85 units/s) and run
                     // to catch up; the rewrite bot only has its speed.
                     walking: (p.motion_velocity * Vec3::new(1., 0., 1.)).length() / 0.0254

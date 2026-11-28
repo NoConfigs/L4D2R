@@ -14,6 +14,9 @@ half = "=2.7.1"
 crc32fast = "=1.5.2"
 l4d2-formats = { path = "vendor/l4d2r-formats" }
 l4d2r-game-core = { path = "vendor/l4d2r-game" }
+# Xbox 360 System Link (XNet / Source netcode for joining 360 games).
+l4d2r-xbox-link = { path = "vendor/l4d2r-xbox-link" }
+cpal = "=0.17.3"
 l4d2r-math = { package = "glam", version = "0.30" }
 # Windows' default process heap fragments badly once a large map is freed
 # (every later allocation slows down); mimalloc does not.

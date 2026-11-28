@@ -1644,6 +1644,7 @@ pub fn run(root: &Path, path: &Path, capture: Option<String>, verify: bool) -> i
     crate::glow_menu::install(&mut app);
     crate::game_chat::install(&mut app);
     crate::multiplayer::install(&mut app);
+    crate::xbox_link::install(&mut app);
     crate::net_play::install(&mut app);
     crate::net_flow::install(&mut app);
     crate::survival::install(&mut app);
@@ -2289,9 +2290,10 @@ pub(crate) fn controls(
         *input = Input::default();
         *refocus = window.focused;
     }
-    if !frontend.playing() || console.as_ref().is_some_and(|c| c.open) {
+    if frontend.in_menu() || console.as_ref().is_some_and(|c| c.open) {
         *wheel_remainder = 0.;
-        s.paused = true;
+        // Online the world keeps running under the menu; only our input stops.
+        s.paused = !crate::game_menu::keep_running();
         if !cursor.visible {
             cursor.visible = true;
         }
@@ -2301,7 +2303,7 @@ pub(crate) fn controls(
         *input = Input::default();
         return;
     }
-    if keys.just_pressed(KeyCode::Escape) {
+    if keys.just_pressed(KeyCode::Escape) && !crate::game_menu::keep_running() {
         s.paused = true;
     }
     // EDIT WORLD (Hammer / Roblox Studio camera): the cursor stays free for
@@ -3469,7 +3471,7 @@ pub(crate) fn combat(
     mut hit_audit: Option<ResMut<crate::studio_hitboxes::Audit>>,
     damage_session: Option<Res<crate::campaign_settings::SessionSettings>>,
     mut upgrade_fx: Option<ResMut<crate::upgrades::Effects>>,
-    squad: Option<Res<Squad>>,
+    mut squad: Option<ResMut<Squad>>,
 ) {
     let _timing = crate::performance::scope("game::combat");
     if s.infected
@@ -3772,6 +3774,39 @@ pub(crate) fn combat(
         );
         let nearest = path.hits.first().map_or(path.end, |h| h.0);
         let target = path.hits.first().map(|h| h.1);
+        // Friendly fire: a survivor in front of the first infected or wall takes
+        // the hit, scaled like retail's survivor_friendly_fire_factor_<difficulty>
+        // (easy 0, normal 0.1, advanced 0.3, expert 0.5). Melee never hurts teammates.
+        // In a real Xbox's game the Xbox already decides this from our usercmds.
+        if !weapon.melee() && !crate::xbox_link::joined_xbox() {
+            use crate::campaign_settings::Difficulty;
+            let factor = match damage_session.as_ref().map(|d| d.difficulty) {
+                Some(Difficulty::Easy) => 0.,
+                Some(Difficulty::Advanced) => 0.3,
+                Some(Difficulty::Expert) => 0.5,
+                _ => 0.1,
+            };
+            let struck = |p: Vec3, height: f32| {
+                crate::ray_box(origin, direction, p + Vec3::new(-0.35, 0., -0.35), p + Vec3::new(0.35, height, 0.35))
+                    .filter(|d| *d > 0.3 && *d < nearest)
+            };
+            if factor > 0. {
+                if !crate::net_play::guest() {
+                    if let Some(q) = squad.as_deref_mut() {
+                        for m in q.0.iter_mut().filter(|m| !m.state.dead) {
+                            if let Some(d) = struck(m.position, if m.state.incap { 0.65 } else { HEIGHT }) {
+                                m.state.damage(weapon.damage_at(d) * factor);
+                            }
+                        }
+                    }
+                }
+                for (survivor, p, incap) in crate::net_play::remote_survivors() {
+                    if let Some(d) = struck(p, if incap { 0.65 } else { HEIGHT }) {
+                        crate::net_play::friendly_fire(&survivor, weapon.damage_at(d) * factor);
+                    }
+                }
+            }
+        }
         if std::env::var_os("L4D2R_PEN_LOG").is_some() && !weapon.melee() {
             eprintln!(
                 "L4D2R_PEN {}: hits {:?} walls {:?} end {:.0}",

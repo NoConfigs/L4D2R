@@ -140,6 +140,8 @@ mod game_audio;
 mod game_console;
 mod game_chat;
 mod multiplayer;
+mod voice_link;
+mod xbox_link;
 mod net_play;
 mod net_flow;
 mod survival;

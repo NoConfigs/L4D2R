@@ -104,6 +104,8 @@ impl Advert {
 pub enum Where {
     Lan(SocketAddr),
     Steam(u64),
+    /// An Xbox 360 System Link game (session id; xbox_link.rs).
+    Xbox(u64),
 }
 
 #[derive(Clone, Debug)]
@@ -119,6 +121,7 @@ impl Found {
         match &self.at {
             Where::Lan(addr) => format!("connect {addr}"),
             Where::Steam(id) => format!("connect_lobby {id}"),
+            Where::Xbox(id) => format!("xbox_join_id {id}"),
         }
     }
     /// The access line: retail L4D360UI_FoundGames_Public / _FriendsOnly,
@@ -126,6 +129,7 @@ impl Found {
     fn access(&self) -> &'static str {
         match self.at {
             Where::Lan(_) => "LAN Game",
+            Where::Xbox(_) => "System Link (Xbox 360)",
             Where::Steam(_) if self.friend || self.advert.access == 1 => "Friend's Game",
             Where::Steam(_) => "Public Game",
         }
@@ -159,6 +163,7 @@ fn merge(list: &mut Vec<Found>, found: Found) {
         Where::Lan(a) if !a.ip().is_loopback() => 0,
         Where::Lan(_) => 1,
         Where::Steam(_) => 2,
+        Where::Xbox(_) => 3,
     };
     if let Some(old) = list.iter_mut().find(|f| f.advert.id == found.advert.id) {
         let friend = old.friend || found.friend;
@@ -266,6 +271,7 @@ fn search(frontend: Option<Res<Frontend>>, mut browser: ResMut<Browser>, time: R
             }
         }
         crate::steam::request_lobbies();
+        crate::xbox_link::browser_search();
     }
     if let Some(s) = &browser.socket {
         let mut buf = [0u8; 2048];
@@ -274,6 +280,9 @@ fn search(frontend: Option<Res<Frontend>>, mut browser: ResMut<Browser>, time: R
             let at = Where::Lan(SocketAddr::new(from.ip(), advert.port));
             merge(&mut browser.found, Found { advert, at, friend: false, seen: now });
         }
+    }
+    for (id, advert) in crate::xbox_link::browser_games() {
+        merge(&mut browser.found, Found { advert, at: Where::Xbox(id), friend: false, seen: now });
     }
     for (lobby, text, friend) in crate::steam::found_lobbies() {
         if let Some(advert) = Advert::parse(&text) {
@@ -559,6 +568,7 @@ pub(crate) fn presentation(
                 _ => match f.at {
                     Where::Lan(_) => "LAN".into(),
                     Where::Steam(_) => "Steam".into(),
+                    Where::Xbox(_) => "Xbox 360".into(),
                 },
             }
         } else {

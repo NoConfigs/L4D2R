@@ -515,6 +515,8 @@ pub struct Match {
     /// cleared once they move faster than z_walk_speed (85). Bots following
     /// within sb_separation_range walk while it is set (1038ed10).
     pub walk_flag: bool,
+    /// Crouched in its owner's game (remote players and Xbox survivors).
+    pub remote_crouch: bool,
     /// Seconds left of a survivor stagger and its horizontal push direction.
     pub stagger: f32,
     pub stagger_dir: Vec3,
@@ -595,6 +597,7 @@ impl Match {
             post_pills: 0.,
             post_healed: 0.,
             walk_flag: false,
+            remote_crouch: false,
             stagger: 0.,
             stagger_dir: Vec3::ZERO,
             ledge: None,

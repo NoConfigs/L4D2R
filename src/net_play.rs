@@ -29,6 +29,21 @@ const TIMEOUT: f64 = 3.;
 /// ids stay below this.
 const BOT_KEY: u32 = 1000;
 
+/// Remote players' survivors as last seen (survivor name, feet, incapacitated),
+/// for friendly fire (game.rs combat).
+static REMOTE: std::sync::Mutex<Vec<(String, Vec3, bool)>> = std::sync::Mutex::new(Vec::new());
+/// Friendly-fire damage we dealt to remote players, sent on the next exchange.
+static FF_OUT: std::sync::Mutex<Vec<(String, f32)>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn remote_survivors() -> Vec<(String, Vec3, bool)> {
+    REMOTE.lock().unwrap().clone()
+}
+
+/// We shot `survivor` (another player's) for `amount`.
+pub(crate) fn friendly_fire(survivor: &str, amount: f32) {
+    FF_OUT.lock().unwrap().push((survivor.to_string(), amount));
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Sample {
     pub position: Vec3,
@@ -47,6 +62,8 @@ pub(crate) struct Sample {
     /// Hanging from a ledge: (seconds since the grab, hang health). The
     /// aim then points at the wall, so others draw the hang facing it.
     pub hang: Option<(f32, f32)>,
+    /// Crouched (others draw the crouch idle / crouch run).
+    pub crouched: bool,
 }
 
 impl Sample {
@@ -67,6 +84,7 @@ impl Sample {
             "f": self.shots,
             "pn": self.pinned_by.map(|c| c.name()),
             "lg": self.hang.map(|(t, h)| [r(t), r(h)]),
+            "c": self.crouched,
         })
     }
     pub(crate) fn from_json(m: &Value) -> Option<(String, Self)> {
@@ -102,6 +120,7 @@ impl Sample {
                     let h = a.get(1)?.as_f64()? as f32;
                     (t.is_finite() && h.is_finite()).then_some((t.max(0.), h.max(0.)))
                 }),
+                crouched: b("c"),
             },
         ))
     }
@@ -235,8 +254,10 @@ fn squad_index(squad: &Squad, survivor: &str) -> Option<usize> {
     squad.0.iter().position(|m| m.model.ends_with(&model))
 }
 
+/// In an online game. The pause menu counts: online play keeps running under
+/// it (Frontend::playing), so remote players and bots must keep their tracks.
 fn in_game(frontend: &crate::game_menu::Frontend, session: &Session) -> bool {
-    frontend.page == crate::game_menu::Page::Game && session.core.online()
+    frontend.playing() && session.core.online()
 }
 
 /// Chapter changes: the host announces the map it is changing to; guests
@@ -324,6 +345,8 @@ pub(crate) fn exchange(
     net.host = playing && session.core.is_host();
     HOST.store(net.host && session.core.members.len() > 1, std::sync::atomic::Ordering::Relaxed);
     if !playing {
+        REMOTE.lock().unwrap().clear();
+        FF_OUT.lock().unwrap().clear();
         net.tracks.clear();
         net.announced = None;
         net.other.clear();
@@ -331,6 +354,9 @@ pub(crate) fn exchange(
         net.flow.clear();
         net.applied.clear();
         return;
+    }
+    for (survivor, amount) in std::mem::take(&mut *FF_OUT.lock().unwrap()) {
+        session.core.game(json!({"k": "ff", "s": survivor, "a": (amount * 10.).round() / 10.}));
     }
     for message in std::mem::take(&mut net.outgoing) {
         session.core.game(message);
@@ -350,6 +376,19 @@ pub(crate) fn exchange(
     let now = time.elapsed_secs_f64();
     for (from, message) in inbox {
         let kind = message.get("k").and_then(Value::as_str).unwrap_or("");
+        // Someone shot our survivor.
+        if kind == "ff" {
+            let me = settings.as_deref().map(|s| s.survivor.name());
+            if me.is_some() && message.get("s").and_then(Value::as_str) == me {
+                if let Some(state) = state.as_deref_mut() {
+                    let amount = message.get("a").and_then(Value::as_f64).unwrap_or(0.) as f32;
+                    if amount.is_finite() && amount > 0. && !state.dead {
+                        state.damage(amount.min(100.));
+                    }
+                }
+            }
+            continue;
+        }
         if matches!(kind, "use" | "lost" | "restart" | "won" | "spit" | "acid" | "rocks" | "gore" | "blood" | "surv") {
             net.flow.push((from, message));
             continue;
@@ -377,6 +416,12 @@ pub(crate) fn exchange(
         }
     }
     net.tracks.retain(|_, t| t.samples.back().is_some_and(|(at, _)| now - at < TIMEOUT));
+    *REMOTE.lock().unwrap() = net
+        .tracks
+        .iter()
+        .filter(|(k, _)| **k < BOT_KEY)
+        .filter_map(|(_, t)| t.samples.back().filter(|(_, s)| !s.dead).map(|(_, s)| (t.survivor.clone(), s.position, s.incap)))
+        .collect();
     if now - net.last_send < 1. / RATE {
         return;
     }
@@ -403,6 +448,7 @@ pub(crate) fn exchange(
         shots: state.shot_serial,
         pinned_by: if state.pinned { state.pinned_by } else { None },
         hang: state.ledge.map(|h| ((state.elapsed - h.grabbed).max(0.), state.incap_health)),
+        crouched: body.crouched,
     };
     if std::env::var_os("L4D2R_NET_DEBUG").is_some() && (now * 20.) as u64 % 40 == 0 {
         println!("Net play: sending {} at {:.2?}", settings.survivor.name(), sample.position);
@@ -430,6 +476,7 @@ pub(crate) fn exchange(
                     shots: s.shot_serial,
                     pinned_by: if s.pinned { s.pinned_by } else { None },
                     hang: s.ledge.map(|h| ((s.elapsed - h.grabbed).max(0.), s.incap_health)),
+                    crouched: false,
                 }
                 .to_json(name);
                 message["b"] = json!(true);
@@ -531,6 +578,7 @@ fn apply(
         }
         member.aim = s.aim;
         member.vertical = 0.;
+        member.state.remote_crouch = s.crouched;
         let revived = net.revived.contains_key(&index);
         let m = &mut member.state;
         m.health = s.health;
@@ -715,6 +763,7 @@ mod tests {
             shots: 3,
             pinned_by: Some(crate::special_infected::SpecialClass::Hunter),
             hang: Some((1.5, 210.)),
+            crouched: false,
         }
     }
 

@@ -74,6 +74,10 @@ pub enum Event {
 pub enum Link {
     Tcp(Peer),
     Steam(u64),
+    /// A real Xbox 360 host over System Link (xbox_link.rs).
+    Xbox(crate::xbox_link::Bridge),
+    /// A 360 console in our hosted System Link game, as a guest (xbox_link.rs).
+    XboxGuest(crate::xbox_link::ConsoleBridge),
 }
 impl Link {
     fn queue(&mut self, payload: &[u8]) -> Result<(), NetError> {
@@ -86,18 +90,25 @@ impl Link {
                     Err(NetError::Closed)
                 }
             }
+            Link::Xbox(b) => {
+                b.queue(payload);
+                Ok(())
+            }
+            Link::XboxGuest(_) => Ok(()),
         }
     }
     fn flush(&mut self) -> Result<(), NetError> {
         match self {
             Link::Tcp(p) => p.flush(),
-            Link::Steam(_) => Ok(()),
+            Link::Steam(_) | Link::Xbox(_) | Link::XboxGuest(_) => Ok(()),
         }
     }
     fn poll(&mut self) -> Result<Vec<Vec<u8>>, NetError> {
         match self {
             Link::Tcp(p) => p.poll(),
             Link::Steam(id) => crate::steam::take(*id).ok_or(NetError::Closed),
+            Link::Xbox(b) => b.poll().ok_or(NetError::Closed),
+            Link::XboxGuest(b) => b.poll().ok_or(NetError::Closed),
         }
     }
 }
@@ -358,6 +369,12 @@ impl SessionCore {
             let id = *next_id;
             *next_id += 1;
             clients.push(Client { peer: Link::Steam(steam_id), id, ready: false });
+        }
+        // Consoles in our hosted System Link game (xbox_host).
+        for console in crate::xbox_link::take_new_consoles() {
+            let id = *next_id;
+            *next_id += 1;
+            clients.push(Client { peer: Link::XboxGuest(console), id, ready: false });
         }
         let mut incoming = Vec::new();
         let mut gone = Vec::new();
@@ -784,6 +801,13 @@ enum Request {
     Say(crate::game_chat::Mode, String),
     /// Join a Steam lobby (`connect_lobby <id>`, `+connect_lobby`).
     JoinLobby(u64),
+    /// Join the Xbox System Link game chosen with `xbox_join`.
+    JoinXbox,
+}
+
+/// `xbox_join`: connect the session to the Xbox bridge.
+pub(crate) fn join_xbox() {
+    REQUESTS.lock().unwrap().push(Request::JoinXbox);
 }
 
 /// Our Steam lobby while hosting or joined (0: none), for INVITE FRIENDS.
@@ -825,6 +849,9 @@ fn set_status(text: &str) {
 
 /// Console commands: `connect <address>[:port]`, `disconnect`, `status`.
 pub fn command(command: &str) -> Option<String> {
+    if let Some(reply) = crate::xbox_link::command(command) {
+        return Some(reply);
+    }
     let mut words = command.split_whitespace();
     let verb = words.next()?.to_ascii_lowercase();
     match verb.as_str() {
@@ -953,6 +980,10 @@ pub(crate) fn run(
                     let _ = tx.send(Peer::connect(addr));
                 });
                 session.connecting = Some((address, Mutex::new(rx)));
+            }
+            Request::JoinXbox => {
+                set_status("Joining an Xbox 360 System Link game...");
+                session.core.join(Link::Xbox(crate::xbox_link::Bridge::new()));
             }
             Request::JoinLobby(id) => {
                 set_status("Joining the Steam lobby...");
@@ -1155,6 +1186,13 @@ pub(crate) fn run(
                 frontend.mode = crate::survival::lobby_mode(frontend.mode, s.survival);
                 if let (Some(sel), Some(catalog)) = (sel.as_mut(), catalog.as_ref()) {
                     apply_settings(s, sel, catalog);
+                    // In an Xbox's game, load as the survivor it gave us.
+                    if let Some(name) = crate::xbox_link::assigned_survivor() {
+                        let roster = crate::campaign_settings::Survivor::roster(catalog.campaigns[sel.campaign].original);
+                        if let Some(&want) = roster.iter().find(|r| r.name().eq_ignore_ascii_case(&name)) {
+                            sel.survivor = want;
+                        }
+                    }
                 }
                 lobby.pending_start = true;
             }
@@ -1240,7 +1278,13 @@ pub(crate) fn run(
                 let taken = |s: &crate::campaign_settings::Survivor| {
                     session.core.members.iter().any(|m| m.id != me && m.survivor == s.name())
                 };
-                if let Some(free) = roster.iter().find(|s| !taken(s)) {
+                // An Xbox lobby refuses a taken survivor: keep the one its host
+                // has for us rather than jumping to another.
+                let xbox = crate::xbox_link::host_survivor();
+                let kept = (crate::xbox_link::in_xbox_lobby() && !xbox.is_empty())
+                    .then(|| roster.iter().find(|s| s.name().eq_ignore_ascii_case(xbox)))
+                    .flatten();
+                if let Some(free) = kept.or_else(|| roster.iter().find(|s| !taken(s))) {
                     sel.survivor = *free;
                 }
             }

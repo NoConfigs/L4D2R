@@ -52,9 +52,24 @@ impl Frontend {
     pub fn playing_for_test() -> Self {
         Self { page: Page::Game, mode: 0, restart: false, started: true }
     }
+    /// The world is running: in game, or in the pause menu during an online
+    /// game (online play does not pause; only our own input stops).
     pub fn playing(&self) -> bool {
-        self.page == Page::Game
+        self.page == Page::Game || (self.page == Page::Pause && keep_running())
     }
+    /// The menu is over the game (our input is not the game's).
+    pub fn in_menu(&self) -> bool {
+        self.page != Page::Game
+    }
+}
+
+/// Online (rewrite session or Xbox System Link): the pause menu must not stop the world.
+static KEEP_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) fn keep_running() -> bool {
+    KEEP_RUNNING.load(std::sync::atomic::Ordering::Relaxed)
+}
+pub(crate) fn set_keep_running(on: bool) {
+    KEEP_RUNNING.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 #[derive(Component)]
 pub(crate) struct MenuRoot;
@@ -567,7 +582,7 @@ pub fn hybrid_paint(
     mut open_parts: Query<&mut Node, (With<OpenPart>, Without<Blotch>)>,
     mut blotches: Query<&mut Node, (With<Blotch>, Without<OpenPart>)>,
 ) {
-    if frontend.playing() && !frontend.is_changed() {
+    if !frontend.in_menu() && !frontend.is_changed() {
         return;
     }
     let unit = windows.iter().next().map_or(1., |w| w.height() / 720.);
@@ -742,7 +757,7 @@ pub fn setup(
         &mut images,
         "materials/console/background_menu_widescreen.vtf",
     );
-    if !frontend.playing() {
+    if frontend.in_menu() {
         match crate::menu_video::start(&source.0, &mut images) {
             Ok(video) => {
                 background = video.image.clone();
@@ -1487,7 +1502,7 @@ pub fn setup(
         })
         .collect();
     commands.insert_resource(MenuArt { modes, chapters });
-    if !frontend.playing() {
+    if frontend.in_menu() {
         queue.0.push_back(game_audio::Request {
             name: "sound/music/l4d2/l4d2_c1.wav".into(),
             position: None,
@@ -1632,8 +1647,9 @@ pub fn update(
                 lobby::leave(l);
             }
         }
-        frontend.page = if frontend.playing() {
-            s.paused = true;
+        frontend.page = if !frontend.in_menu() {
+            // Online the world keeps running under the pause menu.
+            s.paused = !keep_running();
             Page::Pause
         } else if frontend.page == Page::Pause {
             Page::Game
@@ -2029,7 +2045,7 @@ pub fn presentation(
     mut flyouts: Query<&mut UiTransform, With<OptionsFlyout>>,
 ) {
     // Hidden carousel layout must not invalidate the whole UI during gameplay.
-    if frontend.playing() && !frontend.is_changed() {
+    if !frontend.in_menu() && !frontend.is_changed() {
         return;
     }
     for mut transform in &mut flyouts {
@@ -2075,7 +2091,7 @@ pub fn presentation(
                 1.
             },
         );
-        let display = if frontend.playing() {
+        let display = if !frontend.in_menu() {
             Display::None
         } else {
             Display::Flex
@@ -2103,7 +2119,7 @@ pub fn presentation(
         }
     }
     for mut node in &mut hud {
-        let display = if frontend.playing() || frontend.page == Page::Touch {
+        let display = if !frontend.in_menu() || frontend.page == Page::Touch {
             Display::Flex
         } else {
             Display::None
@@ -2112,7 +2128,7 @@ pub fn presentation(
             node.display = display;
         }
     }
-    if frontend.playing() {
+    if !frontend.in_menu() {
         return;
     }
     for (tile, mut image, children, mut node) in &mut selected {
